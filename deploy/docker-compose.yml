@@ -1,0 +1,137 @@
+name: ibm-mcp-stack
+
+# Top-level compose for the Tableau MCP gateway stack.
+#
+# Includes ContextForge's base compose (gateway + postgres + redis + nginx),
+# adds two federated MCP servers (Tableau MCP, dashboard-context) and a
+# one-shot bootstrap job that registers them with the gateway.
+#
+# Run:
+#   cp .env.example .env    # fill in Tableau PAT + JWT_SECRET_KEY
+#   docker compose up -d
+#
+# Public entry point: http://localhost:8080/  (nginx → gateway)
+# Admin UI:           http://localhost:8080/admin
+
+include:
+  - path: ../mcp-context-forge/docker-compose.yml
+    env_file: .env
+
+services:
+
+  # ─────────────────────────────────────────────────────────────
+  # Overrides for services from the included ContextForge compose:
+  # skip local Containerfile.lite build (it pulls a linux/s390x
+  # wheels image that requires GHCR auth) and use the released
+  # image straight from GHCR.
+  # ─────────────────────────────────────────────────────────────
+  gateway:
+    build: !reset null
+    image: ${IMAGE_LOCAL:-ghcr.io/ibm/mcp-context-forge:v1.0.4}
+    pull_policy: missing
+    environment:
+      # Base compose hardcodes both of these to `changeme`; re-thread through .env
+      # so operators can rotate the seed password without patching the include.
+      PLATFORM_ADMIN_PASSWORD: ${PLATFORM_ADMIN_PASSWORD}
+      DEFAULT_USER_PASSWORD: ${PLATFORM_ADMIN_PASSWORD}
+
+  migration:
+    build: !reset null
+    image: ${IMAGE_LOCAL:-ghcr.io/ibm/mcp-context-forge:v1.0.4}
+    pull_policy: missing
+
+  # The base compose hardcodes POSTGRES_PASSWORD=mysecretpassword on the
+  # postgres service while other services template it from .env — that
+  # mismatch bricks auth. Re-thread the env value through.
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+  # ─────────────────────────────────────────────────────────────
+  # Official Tableau MCP server, HTTP transport.
+  # https://github.com/tableau/tableau-mcp — streamable-http on /tableau-mcp
+  # ─────────────────────────────────────────────────────────────
+  tableau-mcp:
+    build:
+      context: ./tableau-mcp
+      args:
+        TABLEAU_MCP_REF: ${TABLEAU_MCP_REF:-v2.22.0}
+    image: local/tableau-mcp:${TABLEAU_MCP_REF:-v2.22.0}
+    restart: unless-stopped
+    networks: [mcpnet]
+    environment:
+      - TRANSPORT=http
+      - HTTP_PORT=3927
+      - SERVER=${TABLEAU_SERVER}
+      - SITE_NAME=${TABLEAU_SITE_NAME}
+      - PAT_NAME=${TABLEAU_PAT_NAME}
+      - PAT_VALUE=${TABLEAU_PAT_VALUE}
+      - DEFAULT_LOG_LEVEL=${TABLEAU_LOG_LEVEL:-info}
+      - INCLUDE_TOOLS=${TABLEAU_INCLUDE_TOOLS:-}
+      - EXCLUDE_TOOLS=${TABLEAU_EXCLUDE_TOOLS:-}
+      - MAX_RESULT_LIMIT=${TABLEAU_MAX_RESULT_LIMIT:-}
+      - DATASOURCE_CREDENTIALS=${TABLEAU_DATASOURCE_CREDENTIALS:-}
+      # First iteration: skip OAuth 2.1 and use PAT-only auth on the server side.
+      # Next iteration wires OAUTH_ISSUER to our IdP and drops this flag.
+      - DANGEROUSLY_DISABLE_OAUTH=${TABLEAU_DISABLE_OAUTH:-true}
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3927/tableau-mcp',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ─────────────────────────────────────────────────────────────
+  # Custom MCP server: dashboard-context.
+  # Exposes tools that enrich Tableau dashboards with business context
+  # (owners, freshness, KPIs) from a versioned YAML registry, merged
+  # with live metadata pulled via Tableau REST.
+  # ─────────────────────────────────────────────────────────────
+  dashboard-context:
+    build: ./dashboard-context
+    image: local/dashboard-context:0.1.0
+    restart: unless-stopped
+    networks: [mcpnet]
+    environment:
+      - TABLEAU_SERVER=${TABLEAU_SERVER}
+      - TABLEAU_SITE_NAME=${TABLEAU_SITE_NAME}
+      - TABLEAU_PAT_NAME=${TABLEAU_PAT_NAME}
+      - TABLEAU_PAT_VALUE=${TABLEAU_PAT_VALUE}
+      - TABLEAU_API_VERSION=${TABLEAU_API_VERSION:-3.22}
+      - CATALOG_PATH=/app/catalog/dashboards.yml
+      - HTTP_PORT=8000
+    volumes:
+      # Mount catalog read-only so operators can iterate without rebuilds.
+      - ./dashboard-context/catalog:/app/catalog:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health',timeout=3).status==200 else sys.exit(1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ─────────────────────────────────────────────────────────────
+  # One-shot bootstrap: waits for gateway, registers both MCP servers.
+  # Idempotent: re-running is safe (409 on duplicates is ignored).
+  # ─────────────────────────────────────────────────────────────
+  bootstrap:
+    build: ./bootstrap
+    image: local/mcp-bootstrap:0.1.0
+    restart: "no"
+    networks: [mcpnet]
+    depends_on:
+      gateway:
+        condition: service_healthy
+      tableau-mcp:
+        condition: service_started
+      dashboard-context:
+        condition: service_started
+    environment:
+      - GATEWAY_URL=http://gateway:4444
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - JWT_AUDIENCE=${JWT_AUDIENCE:-mcpgateway-api}
+      - JWT_ISSUER=${JWT_ISSUER:-mcpgateway}
+      - ADMIN_EMAIL=${PLATFORM_ADMIN_EMAIL:-admin@example.com}
+      - TABLEAU_MCP_URL=http://tableau-mcp:3927/tableau-mcp
+      - DASHBOARD_CONTEXT_URL=http://dashboard-context:8000/mcp

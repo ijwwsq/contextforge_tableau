@@ -1,0 +1,61 @@
+# Business context for Tableau dashboards.
+#
+# Edit under version control — this is the human-authored side of dashboard
+# descriptions. Live metadata (title, project, last update) is pulled from
+# Tableau REST at request time and merged with these entries.
+#
+# Keys:
+#   luid           — Tableau view LUID (preferred anchor)
+#   slug           — short stable alias used by callers (optional)
+#   name           — human-readable title
+#   owner          — team or person responsible
+#   purpose        — one-line "why this dashboard exists"
+#   audience       — who it's for
+#   description    — free-form markdown: what's in the dashboard (sheets, views,
+#                    filters, what a user actually sees). Write it like you'd
+#                    explain the dash to a new hire.
+#   how_built      — free-form markdown: how the dashboard is assembled — data
+#                    sources, joins, calculated fields, caveats. This is the
+#                    part the model needs to answer "why does this number look
+#                    like that."
+#   kpis           — bullet list of metrics the dashboard actually reports
+#   freshness_sla  — expected refresh cadence
+#   glossary       — dashboard-specific term definitions
+#   notes          — short free-form gotchas, known caveats
+
+dashboards:
+  - slug: sales-weekly
+    luid: 00000000-0000-0000-0000-000000000000
+    name: "Sales — weekly performance"
+    owner: "Revenue Analytics <ra@example.com>"
+    purpose: "Track weekly booked revenue vs. plan across regions."
+    audience: "Sales leadership, RevOps"
+    description: |
+      Landing sheet: booked revenue by week, split by region, with a plan-vs-
+      actual band. Below that, three drilldowns:
+        1. "Deals closed" bar chart — count of ClosedWon opps per rep.
+        2. "Pipeline coverage" — sum of open opp amounts / next-quarter target.
+        3. "Slippage" — deals that moved out of the current quarter (waterfall).
+      Region filter is global; date filter defaults to trailing 13 weeks.
+    how_built: |
+      Data source: `sfdc_opportunities` (Vertica), extract refreshed daily at
+      06:00 UTC. Joined 1:N with `sfdc_accounts` on `account_id` to pull region.
+      Calculated fields:
+        - `booked_revenue`  = SUM([Amount]) WHERE [StageName] = "ClosedWon"
+        - `pipeline_cov`    = SUM([Amount] IF [StageName] IN open stages) /
+                              LOOKUP(target_next_qtr)
+      Caveats:
+        - Currency is USD normalized at booking-time FX; historical restatement
+          not applied.
+        - "Region" collapses APAC-North + APAC-South into APAC on this dash.
+    kpis:
+      - "Booked revenue (weekly, YoY)"
+      - "Deals closed"
+      - "Pipeline coverage"
+    freshness_sla: "daily 06:00 UTC"
+    glossary:
+      booked_revenue: "Sum of ClosedWon opportunities in the week."
+    notes: |
+      RLS is enforced by the Tableau data source; access maps to Salesforce role.
+    calculations:
+      освоение считаем в баранах
