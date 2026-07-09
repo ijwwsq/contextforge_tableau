@@ -56,16 +56,16 @@ async def describe_dashboard(dashboard_id: str) -> dict[str, Any]:
     ALWAYS call this before answering any question about a specific Tableau
     dashboard, workbook, or view — including "what does X show", "how is X
     calculated", "who owns X", "why is this number what it is", or "should I
-    trust X". Do not answer from prior knowledge; the operator maintains a
+    trust X". Do not answer from prior knowledge. The operator maintains a
     hand-written catalog with definitions, calculation logic, data sources,
     caveats, and glossary that override anything you might infer from the
     name alone.
 
-    The response merges:
-      - live Tableau metadata (title, project, workbook, updated_at)
-      - hand-written business context: `description` (what's in the dashboard),
-        `how_built` (data sources, joins, calc fields, caveats), `purpose`,
-        `owner`, `kpis`, `freshness_sla`, `glossary`, `notes`.
+    The response merges live Tableau metadata (title, project, workbook,
+    updated_at) with hand-written business context — `description` (what is
+    in the dashboard), `how_built` (data sources, joins, calc fields,
+    caveats), `purpose`, `owner`, `kpis`, `freshness_sla`, `glossary`, and
+    `notes`.
 
     If `sources.catalog` is false, the operator has not documented this
     dashboard — say so explicitly rather than guessing.

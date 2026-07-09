@@ -15,19 +15,28 @@ import httpx
 import jwt
 
 
-def mint_admin_token() -> str:
+def mint_admin_token(expiry_seconds: int = 3600, subject: str | None = None) -> str:
+    """Mint an admin JWT accepted by ContextForge.
+
+    Args:
+        expiry_seconds: TTL for the token. Bootstrap uses the short default;
+            client-facing tools like `mint_token.py` pass a longer value.
+        subject: Overrides the `sub`/`email` claim. Defaults to ADMIN_EMAIL.
+    """
     secret = os.environ["JWT_SECRET_KEY"]
     algo = os.environ.get("JWT_ALGORITHM", "HS256")
+    sub = subject or os.environ.get("ADMIN_EMAIL", "admin@example.com")
+    now = int(time.time())
     payload = {
-        "sub": os.environ.get("ADMIN_EMAIL", "admin@example.com"),
-        "email": os.environ.get("ADMIN_EMAIL", "admin@example.com"),
+        "sub": sub,
+        "email": sub,
         "aud": os.environ.get("JWT_AUDIENCE", "mcpgateway-api"),
         "iss": os.environ.get("JWT_ISSUER", "mcpgateway"),
         "is_admin": True,
         "teams": None,          # admin bypass — see mcp-context-forge CLAUDE.md
-        "iat": int(time.time()),
-        "exp": int(time.time()) + 3600,
-        "jti": f"bootstrap-{int(time.time())}",
+        "iat": now,
+        "exp": now + expiry_seconds,
+        "jti": f"bootstrap-{now}",
     }
     return jwt.encode(payload, secret, algorithm=algo)
 

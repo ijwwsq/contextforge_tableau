@@ -9,6 +9,6 @@ WORKDIR /app
 RUN pip install --upgrade pip \
  && pip install "httpx>=0.27" "pyjwt>=2.8"
 
-COPY register.py ./
+COPY register.py mint_token.py ./
 
 CMD ["python", "register.py"]

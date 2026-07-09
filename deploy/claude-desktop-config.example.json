@@ -1,0 +1,15 @@
+{
+  "_comment": "Drop the `tableau-gateway` entry into your existing Claude Desktop config at ~/Library/Application Support/Claude/claude_desktop_config.json (macOS) or %APPDATA%\\Claude\\claude_desktop_config.json (Windows). Generate a fresh TOKEN with `make token` and restart Claude Desktop after editing.",
+  "mcpServers": {
+    "tableau-gateway": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "http://localhost:8080/mcp",
+        "--header",
+        "Authorization:Bearer REPLACE_WITH_TOKEN_FROM_make_token"
+      ]
+    }
+  }
+}
