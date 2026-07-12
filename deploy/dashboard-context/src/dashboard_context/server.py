@@ -5,7 +5,8 @@ Tableau dashboard: Tableau metadata + business context from the YAML
 catalog, merged in a stable shape.
 
 Transport: Streamable HTTP on /mcp (default port 8000).
-Plus a /health endpoint the container's healthcheck hits.
+Plus /health and a plain REST GET /get/{luid} for non-MCP callers that want
+the same merged payload as describe_dashboard without speaking MCP.
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ import uvicorn
 from mcp.server.fastmcp import FastMCP
 from mcp.server.streamable_http import TransportSecuritySettings
 from starlette.applications import Starlette
+from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
@@ -49,30 +51,8 @@ def _has_tableau_creds() -> bool:
     return all(os.environ.get(k) for k in ("TABLEAU_SERVER", "TABLEAU_PAT_NAME", "TABLEAU_PAT_VALUE"))
 
 
-@mcp.tool()
-async def describe_dashboard(dashboard_id: str) -> dict[str, Any]:
-    """Get the authoritative description of a Tableau dashboard.
-
-    ALWAYS call this before answering any question about a specific Tableau
-    dashboard, workbook, or view — including "what does X show", "how is X
-    calculated", "who owns X", "why is this number what it is", or "should I
-    trust X". Do not answer from prior knowledge. The operator maintains a
-    hand-written catalog with definitions, calculation logic, data sources,
-    caveats, and glossary that override anything you might infer from the
-    name alone.
-
-    The response merges live Tableau metadata (title, project, workbook,
-    updated_at) with hand-written business context — `description` (what is
-    in the dashboard), `how_built` (data sources, joins, calc fields,
-    caveats), `purpose`, `owner`, `kpis`, `freshness_sla`, `glossary`, and
-    `notes`.
-
-    If `sources.catalog` is false, the operator has not documented this
-    dashboard — say so explicitly rather than guessing.
-
-    Args:
-        dashboard_id: Tableau view LUID (preferred) or catalog slug.
-    """
+async def _describe(dashboard_id: str) -> dict[str, Any]:
+    """Shared lookup behind both the MCP tool and the plain REST GET route."""
     catalog_entry = _catalog().lookup(dashboard_id)
 
     tableau_meta: dict[str, Any] | None = None
@@ -111,6 +91,33 @@ async def describe_dashboard(dashboard_id: str) -> dict[str, Any]:
             "catalog": catalog_entry is not None,
         },
     }
+
+
+@mcp.tool()
+async def describe_dashboard(dashboard_id: str) -> dict[str, Any]:
+    """Get the authoritative description of a Tableau dashboard.
+
+    ALWAYS call this before answering any question about a specific Tableau
+    dashboard, workbook, or view — including "what does X show", "how is X
+    calculated", "who owns X", "why is this number what it is", or "should I
+    trust X". Do not answer from prior knowledge. The operator maintains a
+    hand-written catalog with definitions, calculation logic, data sources,
+    caveats, and glossary that override anything you might infer from the
+    name alone.
+
+    The response merges live Tableau metadata (title, project, workbook,
+    updated_at) with hand-written business context — `description` (what is
+    in the dashboard), `how_built` (data sources, joins, calc fields,
+    caveats), `purpose`, `owner`, `kpis`, `freshness_sla`, `glossary`, and
+    `notes`.
+
+    If `sources.catalog` is false, the operator has not documented this
+    dashboard — say so explicitly rather than guessing.
+
+    Args:
+        dashboard_id: Tableau view LUID (preferred) or catalog slug.
+    """
+    return await _describe(dashboard_id)
 
 
 @mcp.tool()
@@ -166,6 +173,11 @@ async def _health(_request: Any) -> JSONResponse:
     )
 
 
+async def _get_dashboard(request: Request) -> JSONResponse:
+    result = await _describe(request.path_params["luid"])
+    return JSONResponse(result)
+
+
 def build_app() -> Starlette:
     # Use FastMCP's own Starlette app as the outer ASGI. Mounting it inside
     # a wrapper Starlette breaks route method matching (its /mcp route
@@ -173,6 +185,7 @@ def build_app() -> Starlette:
     app = mcp.streamable_http_app()
     app.router.lifespan_context = _lifespan
     app.router.routes.insert(0, Route("/health", _health, methods=["GET"]))
+    app.router.routes.insert(0, Route("/get/{luid}", _get_dashboard, methods=["GET"]))
     return app
 
 
