@@ -2,7 +2,7 @@
 
 Стек: **ContextForge** (без Keycloak) поднимает шлюз перед двумя федеративными MCP-серверами:
 
-- **`tableau`** — официальный Tableau MCP (`github.com/tableau/tableau-mcp`) в режиме streamable-HTTP.
+- **`tableau`** — официальный Tableau MCP (`github.com/tableau/tableau-mcp`) в режиме streamable-HTTP + `DISABLE_SESSION_MANAGEMENT=true` (stateless — обязательно, иначе ContextForge не сможет проксировать вызовы, см. комментарий в docker-compose).
 - **`dashboard-context`** — наш кастомный MCP, который смешивает live-метаданные из Tableau REST с бизнес-каталогом, который отдаёт отдельный сервис-админка.
 
 ```
@@ -102,11 +102,11 @@ make logs           # смотрим, как bootstrap регистрирует 
 Полное покрытие (`dashboard-context`, `bootstrap`, интеграция MCP↔админка) лежит в `deploy/tests/` и гоняется через:
 
 ```bash
+make test-deps      # один раз в свежем venv — pip install -r tests/requirements.txt
 make test           # cd tests && python3 -m pytest -v
 ```
 
-Ожидаемо: 72 теста зелёные. Зависимости для тестов:
-`pytest pytest-asyncio httpx pyyaml starlette ruamel.yaml mcp python-multipart pyjwt uvicorn`.
+Ожидаемо: 72 теста зелёные.
 
 ## Чеклист миграции в прод (что меняется)
 

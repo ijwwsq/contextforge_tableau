@@ -1,0 +1,22 @@
+# Зависимости для запуска pytest-набора из deploy/tests/.
+# Устанавливаются командой `make test-deps` или напрямую:
+#   pip install -r tests/requirements.txt
+#
+# Внутри — сам pytest + плагины и все рантайм-либы, которые тесты дёргают
+# через модули dashboard_context / bootstrap.
+
+pytest>=8.0
+pytest-asyncio>=0.23
+
+# Рантайм dashboard-context (совпадает с dashboard-context/pyproject.toml).
+mcp>=1.27.1
+httpx>=0.27
+pydantic>=2.6
+pyyaml>=6.0
+uvicorn>=0.30
+starlette>=0.37
+ruamel.yaml>=0.18
+python-multipart>=0.0.9
+
+# Рантайм bootstrap.
+pyjwt>=2.8

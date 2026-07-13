@@ -61,7 +61,17 @@ services:
     networks: [mcpnet]
     environment:
       - TRANSPORT=http
+      # tableau-mcp читает порт из env-переменной, ИМЯ которой указано в
+      # HTTP_PORT_ENV_VAR_NAME (сама переменная HTTP_PORT напрямую не читается).
+      - HTTP_PORT_ENV_VAR_NAME=HTTP_PORT
       - HTTP_PORT=3927
+      # Гейт (ContextForge) в federated-режиме шлёт каждый tool-call как
+      # отдельный HTTP-запрос и не трекает `Mcp-Session-Id` между вызовами.
+      # В default-режиме tableau-mcp такие запросы отбрасывает с "no valid
+      # session ID", а гейт ретраит → 429 от Tableau и "Failed to create
+      # upstream MCP session" в логах. Отключаем управление сессиями —
+      # каждый POST становится self-contained.
+      - DISABLE_SESSION_MANAGEMENT=true
       - SERVER=${TABLEAU_SERVER}
       - SITE_NAME=${TABLEAU_SITE_NAME}
       - PAT_NAME=${TABLEAU_PAT_NAME}
@@ -71,8 +81,8 @@ services:
       - EXCLUDE_TOOLS=${TABLEAU_EXCLUDE_TOOLS:-}
       - MAX_RESULT_LIMIT=${TABLEAU_MAX_RESULT_LIMIT:-}
       - DATASOURCE_CREDENTIALS=${TABLEAU_DATASOURCE_CREDENTIALS:-}
-      # First iteration: skip OAuth 2.1 and use PAT-only auth on the server side.
-      # Next iteration wires OAUTH_ISSUER to our IdP and drops this flag.
+      # Первая итерация: пропускаем OAuth 2.1 и работаем с PAT-only на стороне сервера.
+      # Следующая итерация — прокидываем OAUTH_ISSUER на наш IdP и убираем этот флаг.
       - DANGEROUSLY_DISABLE_OAUTH=${TABLEAU_DISABLE_OAUTH:-true}
     healthcheck:
       test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3927/tableau-mcp',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\""]
