@@ -1,108 +1,132 @@
-# Tableau MCP gateway — first iteration
+# Tableau MCP gateway — первая итерация
 
-Stack: **ContextForge** (no Keycloak) fronting two federated MCP servers:
+Стек: **ContextForge** (без Keycloak) поднимает шлюз перед двумя федеративными MCP-серверами:
 
-- **`tableau`** — official Tableau MCP (`github.com/tableau/tableau-mcp`) in streamable-HTTP mode.
-- **`dashboard-context`** — our custom MCP that merges Tableau REST metadata with a versioned business catalog.
+- **`tableau`** — официальный Tableau MCP (`github.com/tableau/tableau-mcp`) в режиме streamable-HTTP.
+- **`dashboard-context`** — наш кастомный MCP, который смешивает live-метаданные из Tableau REST с бизнес-каталогом, который отдаёт отдельный сервис-админка.
 
 ```
 Claude Desktop ──▶ nginx :8080 ──▶ ContextForge gateway ──▶ ┬─▶ tableau-mcp :3927/tableau-mcp
                                                             └─▶ dashboard-context :8000/mcp
+                                                                    │
+                                                                    └── CATALOG_URL ──▶ dashboard-context-admin :8010/api/dashboards
 ```
 
-## Layout
+## Раскладка
 
 ```
 deploy/
-├── docker-compose.yml                    # includes ../mcp-context-forge/docker-compose.yml + our 3 services
-├── .env.example                          # secrets template
-├── Makefile                              # up / down / logs / register / token / claude-config
-├── claude-desktop-config.example.json    # snippet operators drop into Claude Desktop's config
+├── docker-compose.yml                    # инклюдит ../mcp-context-forge/docker-compose.yml + наши сервисы
+├── .env.example                          # шаблон секретов
+├── Makefile                              # up / down / logs / register / token / claude-config / test
+├── claude-desktop-config.example.json    # сниппет для конфига Claude Desktop
 ├── tableau-mcp/
-│   └── Dockerfile                        # builds tableau/tableau-mcp @ TABLEAU_MCP_REF
-├── dashboard-context/                    # custom MCP server
+│   └── Dockerfile                        # собирает tableau/tableau-mcp @ TABLEAU_MCP_REF
+├── dashboard-context/                    # кастомный MCP + админка каталога
 │   ├── Dockerfile
 │   ├── pyproject.toml
-│   ├── src/dashboard_context/{server,catalog,tableau}.py
-│   └── catalog/dashboards.yml            # human-authored business context (edit in PRs)
-└── bootstrap/
-    ├── Dockerfile
-    ├── register.py                       # mints admin JWT, POSTs both MCPs to /gateways
-    └── mint_token.py                     # prints a long-lived admin JWT for `make token` / `make claude-config`
+│   ├── src/dashboard_context/{server,catalog,tableau,admin}.py
+│   └── catalog/dashboards.yml            # хранилище, которым владеет админка; редактируется через веб-UI
+├── bootstrap/
+│   ├── Dockerfile
+│   ├── register.py                       # минтит admin-JWT и POST-ит оба MCP в /gateways
+│   └── mint_token.py                     # печатает долгоживущий admin-JWT для `make token` / `make claude-config`
+└── tests/                                # pytest — покрывает MCP, админку и bootstrap (см. `make test`)
 ```
 
-## Bring it up
+## Запуск
 
 ```bash
 cp .env.example .env
-# fill in JWT_SECRET_KEY, POSTGRES_PASSWORD, PLATFORM_ADMIN_PASSWORD,
+# заполнить JWT_SECRET_KEY, POSTGRES_PASSWORD, PLATFORM_ADMIN_PASSWORD,
+# ADMIN_PASSWORD (редактор каталога dashboard-context),
 # TABLEAU_SERVER / TABLEAU_PAT_NAME / TABLEAU_PAT_VALUE
 make up
-make logs           # watch bootstrap register both MCPs
+make logs           # смотрим, как bootstrap регистрирует оба MCP
 ```
 
-Admin UI: <http://localhost:8080/admin> — log in as `PLATFORM_ADMIN_EMAIL` / `PLATFORM_ADMIN_PASSWORD`.
+Две админ-панели:
 
-## Connect Claude Desktop
+- ContextForge admin — <http://localhost:8080/admin> — логин `PLATFORM_ADMIN_EMAIL` / `PLATFORM_ADMIN_PASSWORD`.
+- Редактор каталога dashboard-context — <http://localhost:8010/> — логин `ADMIN_USER` / `ADMIN_PASSWORD` (basic auth). Владеет `catalog/dashboards.yml`; MCP-сервер тянет контекст из `http://dashboard-context-admin:8010/api/dashboards` по мере запросов. Сервис также предоставляет:
+  - `GET /healthz` — docker healthcheck, без авторизации.
+  - `GET /api/dashboards`, `GET /api/dashboards/{luid|slug}` — чтение (без авторизации, только для внутреннего использования).
+  - `POST /api/dashboards`, `PUT /api/dashboards/{key}`, `DELETE /api/dashboards/{key}` — запись, требует basic-auth.
+  - `GET /api/export` — скачать сырой YAML для бэкапа / коммита в репу.
 
-The gateway exposes the aggregate MCP endpoint at `http://localhost:8080/mcp`
-(streamable HTTP, Bearer auth). Claude Desktop only speaks stdio natively, so
-we bridge with [`mcp-remote`](https://www.npmjs.com/package/mcp-remote).
+## Подключить Claude Desktop
 
-1. Mint a token signed with the same `JWT_SECRET_KEY` the gateway uses:
+Шлюз отдаёт агрегированный MCP-эндпоинт на `http://localhost:8080/mcp`
+(streamable HTTP, Bearer-авторизация). Claude Desktop нативно умеет только stdio,
+поэтому мостим через [`mcp-remote`](https://www.npmjs.com/package/mcp-remote).
+
+1. Минтим токен, подписанный тем же `JWT_SECRET_KEY`, что и шлюз:
 
    ```bash
-   make token          # prints a 30-day admin JWT
+   make token          # печатает admin-JWT на 30 дней
    ```
 
-2. Print a ready-to-paste `claude_desktop_config.json` fragment with that
-   token embedded:
+2. Печатаем готовый к вставке фрагмент `claude_desktop_config.json`
+   с уже подставленным токеном:
 
    ```bash
    make claude-config
    ```
 
-3. Merge it into your Claude Desktop config
-   (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS,
-   `%APPDATA%\Claude\claude_desktop_config.json` on Windows) — see
-   `claude-desktop-config.example.json` for the shape — and restart Claude
-   Desktop. The `tableau-gateway` server should appear with tools from both
-   `tableau` and `dashboard-context` federated behind it.
+3. Мёржим его в свой конфиг Claude Desktop
+   (`~/Library/Application Support/Claude/claude_desktop_config.json` на macOS,
+   `%APPDATA%\Claude\claude_desktop_config.json` на Windows) — форма показана в
+   `claude-desktop-config.example.json` — и перезапускаем Claude Desktop.
+   Сервер `tableau-gateway` должен появиться с тулзами обоих
+   `tableau` и `dashboard-context`, федерированными за ним.
 
-Node ≥ 18 is required for `npx mcp-remote`. If Claude Desktop is exposed to
-a remote deployment, override the URL via `MCP_PUBLIC_URL=https://your-host/mcp make claude-config`.
+Для `npx mcp-remote` нужен Node ≥ 18. Если Claude Desktop смотрит в
+удалённый деплой, переопределяем URL через `MCP_PUBLIC_URL=https://your-host/mcp make claude-config`.
 
-## What the custom tool does
+## Что делает кастомная тулза
 
-`dashboard-context` exposes two tools:
+`dashboard-context` отдаёт две тулзы:
 
-- `list_dashboards()` — every entry in `catalog/dashboards.yml`.
-- `describe_dashboard(dashboard_id)` — takes a Tableau view LUID or a catalog slug, returns:
-  - live Tableau metadata (title, project, workbook, updated_at)
-  - business context from the YAML catalog (purpose, owner, KPIs, freshness SLA, glossary)
-  - a `sources` flag so the caller knows which halves succeeded
+- `list_dashboards()` — все записи из каталога.
+- `describe_dashboard(dashboard_id)` — принимает Tableau view LUID или slug из каталога и возвращает:
+  - live-метаданные из Tableau (title, project, workbook, updated_at),
+  - бизнес-контекст из каталога (purpose, owner, KPIs, freshness SLA, glossary),
+  - флаг `sources`, чтобы вызывающая сторона понимала, какие части ответа успешны.
 
-The idea: **Tableau knows the shape of the dashboard; humans know what it means.** The model gets both in one response and can write a description a business user actually wants to read.
+Идея: **Tableau знает форму дашборда; люди знают, что он значит.** Модель получает и то, и другое одним ответом и может написать описание, которое действительно нужно бизнес-пользователю.
 
-Edit `catalog/dashboards.yml` under version control — it's mounted read-only into the container and reloads on mtime change, so iteration doesn't need a rebuild.
+Каталогом владеет `dashboard-context-admin` (`:8010`): правишь записи в веб-UI, и MCP-сервер видит их на следующем запросе (кэш 5 секунд). YAML-файл остаётся представлением на диске, но MCP-сервер напрямую его больше не читает — либо задан `CATALOG_URL` (ходит в админку по HTTP), либо на локальных запусках его не задаём и падаем в fallback на `CATALOG_PATH`.
 
-## Prod migration checklist (what changes)
+## Тесты
 
-- Rotate `JWT_SECRET_KEY`, `POSTGRES_PASSWORD`, `PLATFORM_ADMIN_PASSWORD` to real secret-manager values.
-- Swap `TABLEAU_PAT_*` to whatever your prod path is (still PAT for MVP; per-user OAuth is the next iteration — see `ARCHITECTURE.md §5`).
-- Point `APP_DOMAIN` at your real hostname; put nginx behind your real TLS terminator or turn on the `tls` profile.
-- Publish `local/tableau-mcp`, `local/dashboard-context`, `local/mcp-bootstrap` to your registry with immutable tags and switch `image:` refs.
-- Move `catalog/dashboards.yml` to its own repo or a ConfigMap.
-- When you're ready for SSO: add `--profile sso` and follow `../mcp-context-forge/docker-compose.sso.yml`. Keycloak stays off in this iteration.
+Полное покрытие (`dashboard-context`, `bootstrap`, интеграция MCP↔админка) лежит в `deploy/tests/` и гоняется через:
 
-## Common ops
+```bash
+make test           # cd tests && python3 -m pytest -v
+```
+
+Ожидаемо: 72 теста зелёные. Зависимости для тестов:
+`pytest pytest-asyncio httpx pyyaml starlette ruamel.yaml mcp python-multipart pyjwt uvicorn`.
+
+## Чеклист миграции в прод (что меняется)
+
+- Прокрутить `JWT_SECRET_KEY`, `POSTGRES_PASSWORD`, `PLATFORM_ADMIN_PASSWORD` — подставить реальные значения из секрет-менеджера.
+- Поменять `TABLEAU_PAT_*` на тот путь, что используется в проде (для MVP всё ещё PAT; per-user OAuth — следующая итерация, см. `ARCHITECTURE.md §5`).
+- Указать `APP_DOMAIN` на реальный хостнейм; поставить nginx за настоящий TLS-терминатор или включить профиль `tls`.
+- Опубликовать `local/tableau-mcp`, `local/dashboard-context`, `local/mcp-bootstrap` в регистри с иммутабельными тегами и переключить `image:` на них.
+- Перенести `catalog/dashboards.yml` на persistent volume — либо заменить `dashboard-context-admin` на сервис с БД (MCP-серверу достаточно любого, кто отдаёт `/api/dashboards`).
+- Прокрутить `ADMIN_PASSWORD` и подумать про SSO перед редактором каталога вместо встроенного basic-auth.
+- Когда доходим до SSO: добавляем `--profile sso` и следуем `../mcp-context-forge/docker-compose.sso.yml`. Keycloak в этой итерации выключен.
+
+## Часто нужные команды
 
 ```bash
 make ps
 make logs
-make register           # re-run bootstrap (idempotent)
-make token              # mint a fresh admin JWT for MCP clients
-make claude-config      # print a Claude Desktop config snippet with a fresh token
-make down               # stop; volumes preserved
-make clean              # stop + wipe volumes
+make register           # перезапустить bootstrap (идемпотентно)
+make token              # свежий admin-JWT для MCP-клиентов
+make claude-config      # напечатать сниппет конфига Claude Desktop со свежим токеном
+make test               # прогнать pytest по всему стеку
+make down               # остановить; volumes сохраняются
+make clean              # остановить + снести volumes
 ```

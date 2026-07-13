@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import base64
 import html
+import io
+import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -13,13 +16,16 @@ from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.scalarstring import LiteralScalarString
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 log = logging.getLogger("dashboard_context.admin")
 
 FIELDS_TEXT = ("luid", "slug", "name", "owner", "purpose", "audience", "freshness_sla")
 FIELDS_BLOCK = ("description", "how_built", "notes")
+# Slug должен быть kebab-case: только строчные буквы/цифры/дефис, начинается не с дефиса.
+# LUID валидируем мягко — Tableau генерит UUID'ы, но чужие интеграции могут дать что угодно.
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 _yaml = YAML()
 _yaml.preserve_quotes = True
@@ -55,10 +61,29 @@ def _entry_key(entry: dict) -> str:
 
 
 def _find(data: CommentedMap, key: str) -> CommentedMap | None:
+    # Ищем по luid и по slug — потребитель (UI-ссылка, curl, MCP-сервер)
+    # может знать сущность под любым из двух идентификаторов.
     for entry in data.get("dashboards", []):
-        if _entry_key(entry) == key:
+        if str(entry.get("luid") or "") == key or str(entry.get("slug") or "") == key:
             return entry
     return None
+
+
+def _find_index(data: CommentedMap, key: str) -> int:
+    for i, entry in enumerate(data.get("dashboards", [])):
+        if str(entry.get("luid") or "") == key or str(entry.get("slug") or "") == key:
+            return i
+    return -1
+
+
+def _validate_identifiers(luid: str, slug: str) -> list[str]:
+    """Возвращает список ошибок валидации (пустой = всё OK)."""
+    errors: list[str] = []
+    if not luid and not slug:
+        errors.append("either 'luid' or 'slug' is required")
+    if slug and not _SLUG_RE.match(slug):
+        errors.append("slug must be kebab-case: [a-z0-9][a-z0-9-]* (e.g. sales-weekly)")
+    return errors
 
 
 def _kpis_to_text(entry: dict) -> str:
@@ -274,7 +299,10 @@ _PAGE = """<!doctype html>
     <div class="brand-mark">{{}}</div>
     <div><h1>dashboard-context</h1><div class="sub">Catalog admin</div></div>
   </div>
-  <a class="btn primary" href="/new">+ New dashboard</a>
+  <div style="display:flex; gap:.5rem;">
+    <a class="btn" href="/api/export" title="Скачать весь каталог как YAML">Download YAML</a>
+    <a class="btn primary" href="/new">+ New dashboard</a>
+  </div>
 </div></header>
 <main class="wrap">
 {body}
@@ -465,9 +493,13 @@ async def _edit_post(request: Request) -> RedirectResponse:
 async def _new_post(request: Request) -> Any:
     form = dict((await request.form()).items())
     data = _load()
-    new_key = (form.get("slug") or form.get("luid") or "").strip()
-    if not new_key:
-        return _render("New dashboard", "<p>slug or luid is required.</p>" + _form_body(form, "", is_new=True))
+    luid = (form.get("luid") or "").strip()
+    slug = (form.get("slug") or "").strip()
+    errors = _validate_identifiers(luid, slug)
+    if errors:
+        msg = "; ".join(errors)
+        return _render("New dashboard", f"<p>{html.escape(msg)}.</p>" + _form_body(form, "", is_new=True))
+    new_key = slug or luid
     if _find(data, new_key) is not None:
         return _render(
             "New dashboard",
@@ -483,13 +515,194 @@ async def _new_post(request: Request) -> Any:
 async def _delete_post(request: Request) -> RedirectResponse:
     key = request.path_params["key"]
     data = _load()
-    dashboards = data.get("dashboards", [])
-    for i, entry in enumerate(dashboards):
-        if _entry_key(entry) == key:
-            del dashboards[i]
-            break
-    _save(data)
+    idx = _find_index(data, key)
+    if idx >= 0:
+        del data["dashboards"][idx]
+        _save(data)
     return RedirectResponse("/", status_code=303)
+
+
+# ---------------------------------------------------------------- JSON API
+# Используется MCP-сервером dashboard-context — тулзы больше не читают YAML
+# напрямую. Без авторизации, потому что админка живёт во внутренней Docker-сети;
+# НЕ пробрасывать /api/* через nginx.
+
+def _entry_to_dict(entry: Any) -> dict[str, Any]:
+    # ruamel возвращает CommentedMap/CommentedSeq/LiteralScalarString — JSONResponse
+    # их сериализует, но потребитель видит нестандартные типы. Приводим к обычным builtins.
+    if isinstance(entry, dict):
+        return {k: _entry_to_dict(v) for k, v in entry.items()}
+    if isinstance(entry, list):
+        return [_entry_to_dict(v) for v in entry]
+    if isinstance(entry, str):
+        return str(entry)
+    return entry
+
+
+async def _api_list(_request: Request) -> JSONResponse:
+    entries = [_entry_to_dict(e) for e in _load().get("dashboards", [])]
+    return JSONResponse({"dashboards": entries})
+
+
+async def _api_get(request: Request) -> JSONResponse:
+    entry = _find(_load(), request.path_params["key"])
+    if entry is None:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    return JSONResponse(_entry_to_dict(entry))
+
+
+# ---------------------------------------------------------------- write API
+# POST/PUT/DELETE идут через тот же basic-auth, что и HTML-редактор. GET-ручки
+# остаются без авторизации — их дёргает MCP-сервер из внутренней сети.
+
+_ALLOWED_FIELDS = set(FIELDS_TEXT) | set(FIELDS_BLOCK) | {"kpis", "glossary"}
+
+
+async def _parse_json_body(request: Request) -> Any:
+    try:
+        return await request.json()
+    except json.JSONDecodeError as exc:
+        raise _ApiError(400, f"invalid JSON: {exc}") from exc
+
+
+class _ApiError(Exception):
+    def __init__(self, status: int, message: str):
+        self.status = status
+        self.message = message
+
+
+def _apply_payload(entry: CommentedMap, payload: dict[str, Any]) -> None:
+    """JSON-версия `_apply_form` — принимает уже типизированные значения."""
+    for f in FIELDS_TEXT:
+        v = payload.get(f)
+        if v is None or v == "":
+            if f in entry:
+                del entry[f]
+        else:
+            entry[f] = str(v).strip()
+    for f in FIELDS_BLOCK:
+        v = payload.get(f)
+        if not v:
+            if f in entry:
+                del entry[f]
+        else:
+            text = str(v).rstrip()
+            entry[f] = LiteralScalarString(text + "\n") if text else None
+            if entry[f] is None:
+                del entry[f]
+    kpis = payload.get("kpis")
+    if kpis:
+        seq = CommentedSeq()
+        for item in kpis:
+            if item:
+                seq.append(str(item))
+        if seq:
+            entry["kpis"] = seq
+        elif "kpis" in entry:
+            del entry["kpis"]
+    elif "kpis" in entry:
+        del entry["kpis"]
+    glossary = payload.get("glossary")
+    if glossary:
+        out = CommentedMap()
+        for k, v in glossary.items():
+            out[str(k)] = str(v)
+        if out:
+            entry["glossary"] = out
+        elif "glossary" in entry:
+            del entry["glossary"]
+    elif "glossary" in entry:
+        del entry["glossary"]
+
+
+def _validate_payload(payload: Any) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(payload, dict):
+        return ["body must be a JSON object"]
+    unknown = set(payload.keys()) - _ALLOWED_FIELDS
+    if unknown:
+        errors.append(f"unknown fields: {sorted(unknown)}")
+    if "kpis" in payload and not isinstance(payload["kpis"], list):
+        errors.append("'kpis' must be an array of strings")
+    if "glossary" in payload and not isinstance(payload["glossary"], dict):
+        errors.append("'glossary' must be an object")
+    errors.extend(_validate_identifiers(
+        str(payload.get("luid") or "").strip(),
+        str(payload.get("slug") or "").strip(),
+    ))
+    return errors
+
+
+async def _api_create(request: Request) -> JSONResponse:
+    try:
+        payload = await _parse_json_body(request)
+    except _ApiError as exc:
+        return JSONResponse({"error": exc.message}, status_code=exc.status)
+    errors = _validate_payload(payload)
+    if errors:
+        return JSONResponse({"error": "validation_failed", "details": errors}, status_code=400)
+    data = _load()
+    key = (payload.get("slug") or payload.get("luid") or "").strip()
+    if _find(data, key) is not None:
+        return JSONResponse({"error": "already_exists", "key": key}, status_code=409)
+    entry = CommentedMap()
+    _apply_payload(entry, payload)
+    data["dashboards"].append(entry)
+    _save(data)
+    return JSONResponse(_entry_to_dict(entry), status_code=201)
+
+
+async def _api_update(request: Request) -> JSONResponse:
+    key = request.path_params["key"]
+    try:
+        payload = await _parse_json_body(request)
+    except _ApiError as exc:
+        return JSONResponse({"error": exc.message}, status_code=exc.status)
+    errors = _validate_payload(payload)
+    if errors:
+        return JSONResponse({"error": "validation_failed", "details": errors}, status_code=400)
+    data = _load()
+    entry = _find(data, key)
+    if entry is None:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    _apply_payload(entry, payload)
+    _save(data)
+    return JSONResponse(_entry_to_dict(entry))
+
+
+async def _api_delete(request: Request) -> Response:
+    key = request.path_params["key"]
+    data = _load()
+    idx = _find_index(data, key)
+    if idx < 0:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    del data["dashboards"][idx]
+    _save(data)
+    return Response(status_code=204)
+
+
+async def _api_export(_request: Request) -> Response:
+    """Отдаёт весь YAML-файл как есть (сохраняя стиль/комментарии ruamel'а).
+
+    Удобно для бэкапа перед миграцией или чтобы закоммитить текущее
+    состояние каталога обратно в репозиторий.
+    """
+    buf = io.StringIO()
+    _yaml.dump(_load(), buf)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/yaml",
+        headers={"Content-Disposition": 'attachment; filename="dashboards.yml"'},
+    )
+
+
+async def _healthz(_request: Request) -> JSONResponse:
+    """Healthcheck, который может дёргать docker-compose и nginx."""
+    try:
+        entries = len(_load().get("dashboards", []))
+    except Exception as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+    return JSONResponse({"status": "ok", "entries": entries, "catalog_path": str(_catalog_path())})
 
 
 class _BasicAuth:
@@ -502,6 +715,14 @@ class _BasicAuth:
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path", "")
+        method = scope.get("method", "GET")
+        # /healthz и все GET-ручки /api/* — публичные (их дёргает MCP-сервер
+        # и docker healthcheck из внутренней сети). Записи в /api/* и любой
+        # HTML требуют basic-auth.
+        if path == "/healthz" or (path.startswith("/api/") and method == "GET"):
             await self.app(scope, receive, send)
             return
         headers = dict(scope.get("headers") or [])
@@ -534,6 +755,13 @@ def build_app() -> Any:
             Route("/edit/{key}", _edit_get, methods=["GET"]),
             Route("/edit/{key}", _edit_post, methods=["POST"]),
             Route("/delete/{key}", _delete_post, methods=["POST"]),
+            Route("/healthz", _healthz, methods=["GET"]),
+            Route("/api/dashboards", _api_list, methods=["GET"]),
+            Route("/api/dashboards", _api_create, methods=["POST"]),
+            Route("/api/dashboards/{key}", _api_get, methods=["GET"]),
+            Route("/api/dashboards/{key}", _api_update, methods=["PUT"]),
+            Route("/api/dashboards/{key}", _api_delete, methods=["DELETE"]),
+            Route("/api/export", _api_export, methods=["GET"]),
         ]
     )
     user = os.environ.get("ADMIN_USER", "admin")

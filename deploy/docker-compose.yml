@@ -82,10 +82,11 @@ services:
       start_period: 20s
 
   # ─────────────────────────────────────────────────────────────
-  # Custom MCP server: dashboard-context.
-  # Exposes tools that enrich Tableau dashboards with business context
-  # (owners, freshness, KPIs) from a versioned YAML registry, merged
-  # with live metadata pulled via Tableau REST.
+  # Кастомный MCP-сервер: dashboard-context.
+  # Отдаёт тулзы, которые обогащают дашборды Tableau бизнес-контекстом
+  # (владельцы, freshness, KPI), смерженным с live-метаданными из Tableau REST.
+  # Контекст теперь берётся из HTTP API сервиса-админки, а не читается из YAML
+  # напрямую.
   # ─────────────────────────────────────────────────────────────
   dashboard-context:
     build: ./dashboard-context
@@ -98,13 +99,42 @@ services:
       - TABLEAU_PAT_NAME=${TABLEAU_PAT_NAME}
       - TABLEAU_PAT_VALUE=${TABLEAU_PAT_VALUE}
       - TABLEAU_API_VERSION=${TABLEAU_API_VERSION:-3.22}
-      - CATALOG_PATH=/app/catalog/dashboards.yml
+      - CATALOG_URL=http://dashboard-context-admin:8010/api/dashboards
       - HTTP_PORT=8000
-    volumes:
-      # Mount catalog read-only so operators can iterate without rebuilds.
-      - ./dashboard-context/catalog:/app/catalog:ro
+    depends_on:
+      dashboard-context-admin:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health',timeout=3).status==200 else sys.exit(1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ─────────────────────────────────────────────────────────────
+  # Веб-админка для каталога dashboard-context.
+  # Владеет YAML-файлом (примонтирован rw) и раздаёт его обратно MCP-серверу
+  # через /api/dashboards. Также поднимает человеческий редактор на :8010/.
+  # Nginx к ней НЕ подключён — держим внутри сети или пробрасываем осознанно
+  # через свою авторизацию.
+  # ─────────────────────────────────────────────────────────────
+  dashboard-context-admin:
+    build: ./dashboard-context
+    image: local/dashboard-context:0.1.0
+    restart: unless-stopped
+    networks: [mcpnet]
+    command: ["python", "-m", "dashboard_context.admin"]
+    environment:
+      - CATALOG_PATH=/app/catalog/dashboards.yml
+      - HTTP_PORT=8010
+      - ADMIN_USER=${ADMIN_USER:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+    ports:
+      - "${ADMIN_PORT:-8010}:8010"
+    volumes:
+      - ./dashboard-context/catalog:/app/catalog:rw
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8010/healthz',timeout=3).status==200 else sys.exit(1)\""]
       interval: 30s
       timeout: 5s
       retries: 3

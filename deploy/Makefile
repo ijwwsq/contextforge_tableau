@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: up down restart logs ps register health mcp-list token claude-config clean
+.PHONY: up down restart logs ps register health mcp-list token claude-config clean test
 
 up:  ## Bring up the full stack (gateway + tableau-mcp + dashboard-context + bootstrap).
 	docker compose up -d --build
@@ -37,3 +37,6 @@ claude-config:  ## Print a ready-to-paste claude_desktop_config.json snippet.
 
 clean:  ## Nuke volumes too.
 	docker compose down -v
+
+test:  ## Прогнать pytest по всему стеку (dashboard-context + bootstrap).
+	cd tests && python3 -m pytest -v
