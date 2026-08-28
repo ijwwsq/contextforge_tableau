@@ -108,21 +108,64 @@ def _role_from_cookie(request: Request) -> str | None:
 
 
 # ── страницы ──────────────────────────────────────────────────────────────
+# Единый светлый Notion-like визуал: тёплый near-black текст, тонкие серые
+# границы, один сдержанный синий акцент, без градиентов/теней/блобов.
 _STYLE = """<style>
-:root{--bg:#0f1620;--surface:#16202c;--surface2:#1c2836;--border:#283747;--ink:#e7eef5;--muted:#93a1b1;--accent:#5aa9e6}
-@media(prefers-color-scheme:light){:root{--bg:#f4f6f8;--surface:#fff;--surface2:#eef2f6;--border:#d7dee6;--ink:#16202e;--muted:#586472;--accent:#1f5c8f}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif}
-.wrap{max-width:820px;margin:0 auto;padding:40px 20px}
-h1{font-size:1.5rem;margin:0 0 4px}.sub{color:var(--muted);margin:0 0 28px}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
-.card{display:block;text-decoration:none;color:inherit;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;transition:border-color .12s}
-.card:hover{border-color:var(--accent)}.card h3{margin:0 0 6px;color:var(--accent)}.card p{margin:0;color:var(--muted);font-size:.9rem}
-.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px}
-.pill{font:600 .74rem/1 ui-monospace,monospace;color:var(--accent);background:var(--surface2);border:1px solid var(--border);border-radius:999px;padding:6px 12px}
-form.login{max-width:360px;margin:8vh auto;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:28px}
-form.login input{width:100%;padding:11px;margin-top:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit}
-form.login button{width:100%;margin-top:16px;padding:11px;border:0;border-radius:8px;background:var(--accent);color:#fff;font-weight:700;cursor:pointer}
-.err{color:#e06c6c;margin-top:12px;font-size:.88rem}a.logout{color:var(--muted);font-size:.85rem;text-decoration:none}
+:root{--bg:#ffffff;--surface:#ffffff;--surface2:#f7f7f5;--border:#e9e9e7;
+--text:#37352f;--muted:#787774;--accent:#2383e2;--hover:#f1f1ef;--danger:#c0271f}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+font:16px/1.5 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+.wrap{max-width:820px;margin:0 auto;padding:56px 24px}
+h1{font-size:1.7rem;font-weight:700;letter-spacing:-.01em;margin:0 0 4px}
+.sub{color:var(--muted);margin:0 0 32px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+.card{display:block;text-decoration:none;color:inherit;background:var(--surface);
+border:1px solid var(--border);border-radius:8px;padding:18px 20px;transition:background .1s,border-color .1s}
+.card:hover{background:var(--hover)}
+.card h3{margin:0 0 4px;font-size:1rem;font-weight:600}
+.card p{margin:0;color:var(--muted);font-size:.88rem}
+.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:32px}
+.pill{font:500 .8rem/1 ui-sans-serif,sans-serif;color:var(--muted);background:var(--surface2);
+border:1px solid var(--border);border-radius:6px;padding:6px 12px}
+form.login{max-width:340px;margin:14vh auto;background:var(--surface);
+border:1px solid var(--border);border-radius:10px;padding:28px 26px}
+form.login h1{font-size:1.35rem}
+form.login input{width:100%;padding:10px 12px;margin-top:10px;border:1px solid var(--border);
+border-radius:6px;background:var(--surface);color:var(--text);font:inherit}
+form.login input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px #2383e233}
+form.login button{width:100%;margin-top:18px;padding:10px;border:0;border-radius:6px;
+background:var(--accent);color:#fff;font-weight:600;font-size:.95rem;cursor:pointer}
+form.login button:hover{background:#1a6fc4}
+.err{color:var(--danger);margin-top:12px;font-size:.88rem}
+a.logout{color:var(--muted);font-size:.88rem;text-decoration:none}a.logout:hover{color:var(--text)}
+</style>"""
+
+# Инжектируется в проксируемые страницы бэкендов: переопределяет их
+# CSS-переменные под Notion-палитру, форсит светлую тему и гасит «иишный» декор
+# (градиенты, блобы, тяжёлые тени, градиентный текст), не трогая исходники.
+_INJECT_THEME = """<style id="unified-theme">
+:root{
+  --bg:#ffffff;--surface:#ffffff;--surface-2:#f7f7f5;--surface2:#f7f7f5;
+  --border:#e9e9e7;--row-hover:#f7f7f5;--pill-bg:#f1f1ef;
+  --text:#37352f;--ink:#37352f;--text-muted:#787774;--muted:#787774;
+  --primary:#2383e2;--primary-2:#2383e2;--primary-hover:#1a6fc4;--primary-text:#ffffff;
+  --accent:#2383e2;--accent-basic:#2383e2;--accent-content:#2383e2;--accent-metrics:#2383e2;
+  --danger:#c0271f;--danger-bg:#fdeeed;--shadow:none;--radius:8px;
+  --blob-a:transparent;--blob-b:transparent;--blob-c:transparent;
+}
+html,body{background:#ffffff!important;color:#37352f!important;
+font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif!important}
+body::before,body::after{display:none!important}                 /* декоративные блобы */
+*{box-shadow:none!important;backdrop-filter:none!important}
+h1,.topbar h1,.brand-mark{background:none!important;-webkit-text-fill-color:#37352f!important;color:#37352f!important}
+.brand-mark{background:#2383e2!important;-webkit-text-fill-color:#fff!important;color:#fff!important}
+button.primary,.btn.primary,form.login button,.addform .save,button:hover{filter:none!important}
+button.primary,.btn.primary,.addform .save,.save{background:#2383e2!important;border-color:#2383e2!important;color:#fff!important}
+.topbar,.card,.section,.list th{background:#ffffff!important}
+.section{border-left-color:#e9e9e7!important}
+.pill{background:#f1f1ef!important;color:#787774!important}
+a{color:#2383e2!important}
 </style>"""
 
 
@@ -190,7 +233,23 @@ def _rewrite_html(body: bytes, prefix: str) -> bytes:
     # Корневые ссылки/действия бэкенда → под префикс раздела (без правки бэкенда).
     html = body.decode("utf-8", "replace")
     html = re.sub(r'(href|action|formaction)=(["\'])/(?!/)', rf'\1=\2{prefix}/', html)
+    # Единый визуал: инжектируем тему последней в <head>, чтобы перебить стили бэкенда.
+    if "</head>" in html:
+        html = html.replace("</head>", _INJECT_THEME + "</head>", 1)
+    else:
+        html = _INJECT_THEME + html
     return html.encode("utf-8")
+
+
+def _section_down_page(title: str) -> HTMLResponse:
+    return HTMLResponse(
+        f"""<!doctype html><html lang="ru"><meta charset="utf-8"><title>{title}</title>{_STYLE}
+<body><div class="wrap"><div class="top"><span class="pill">раздел недоступен</span>
+<a class="logout" href="/">← На главную</a></div>
+<h1>{title}</h1><p class="sub">Сервис этого раздела сейчас недоступен. Попробуйте позже
+или проверьте, что соответствующий контейнер запущен.</p></div></body></html>""",
+        status_code=502,
+    )
 
 
 async def _proxy(request: Request) -> Response:
@@ -214,11 +273,15 @@ async def _proxy(request: Request) -> Response:
     headers["Authorization"] = "Basic " + base64.b64encode(sec.auth.encode()).decode()
     body = await request.body()
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        upstream = await client.request(
-            request.method, url, headers=headers, content=body,
-            params=request.query_params, follow_redirects=False,
-        )
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            upstream = await client.request(
+                request.method, url, headers=headers, content=body,
+                params=request.query_params, follow_redirects=False,
+            )
+    except httpx.RequestError:
+        # Бэкенд раздела не поднят/недоступен — не роняем консоль.
+        return _section_down_page(sec.title)
 
     # Редиректы бэкенда (Location: /...) → под префикс раздела.
     out_headers = {}

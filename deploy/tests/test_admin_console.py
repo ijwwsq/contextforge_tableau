@@ -135,6 +135,25 @@ def test_proxy_rewrites_redirect_location(client: TestClient, monkeypatch) -> No
     assert r.headers["location"] == "/context/"  # редирект бэкенда под префикс
 
 
+def test_unified_theme_injected_into_proxied_pages(client: TestClient, monkeypatch) -> None:
+    _login(client, "admin", "admin-pw")
+    _mock_backend(monkeypatch)
+    r = client.get("/context/")
+    assert 'id="unified-theme"' in r.text  # единый визуал подмешан в страницу бэкенда
+
+
+def test_backend_down_shows_friendly_page(client: TestClient, monkeypatch) -> None:
+    _login(client, "admin", "admin-pw")
+
+    class _Down(_FakeClient):
+        async def request(self, *a, **k):
+            raise console.httpx.ConnectError("down")
+
+    monkeypatch.setattr(console.httpx, "AsyncClient", _Down)
+    r = client.get("/presentation/")
+    assert r.status_code == 502 and "недоступен" in r.text  # консоль не падает
+
+
 def test_rewrite_html_unit() -> None:
     out = console._rewrite_html(b'<a href="/">h</a><button formaction="/history/v/restore">', "/context").decode()
     assert 'href="/context/"' in out
