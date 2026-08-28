@@ -122,6 +122,12 @@ services:
       # tool-вызовы для непривязанных юзеров режет брокер — до общего PAT они не
       # доходят (см. tableau-identity). PAT_* ниже нужен только для старта сервера.
       - ENABLE_PASSTHROUGH_AUTH=true
+      # «MCP site settings» — фича Tableau Cloud (настройки набора тулов на сайте).
+      # На Tableau Server этот запрос при регистрации инструментов падает и роняет
+      # ВСЮ регистрацию тулов (500 "getting MCP settings for site"). Отключаем —
+      # инструменты поднимаются без похода в Tableau за настройками сайта. На Cloud
+      # можно вернуть true через TABLEAU_MCP_SITE_SETTINGS=true.
+      - ENABLE_MCP_SITE_SETTINGS=${TABLEAU_MCP_SITE_SETTINGS:-false}
     healthcheck:
       test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3927/tableau-mcp',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\""]
       interval: 30s
