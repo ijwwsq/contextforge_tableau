@@ -9,14 +9,18 @@ pytest>=8.0
 pytest-asyncio>=0.23
 
 # Рантайм dashboard-context (совпадает с dashboard-context/pyproject.toml).
-mcp>=1.27.1
+# mcp<2: код использует mcp.server.fastmcp (API 1.x), в 2.x он переименован.
+mcp>=1.27.1,<2
 httpx>=0.27
 pydantic>=2.6
 pyyaml>=6.0
 uvicorn>=0.30
-starlette>=0.37
+starlette>=0.37,<1.0
 ruamel.yaml>=0.18
 python-multipart>=0.0.9
 
 # Рантайм bootstrap.
 pyjwt>=2.8
+
+# Рантайм tableau-identity (шифрование PAT-секретов).
+cryptography>=42.0

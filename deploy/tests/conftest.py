@@ -15,4 +15,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent  # deploy/
 sys.path.insert(0, str(ROOT / "dashboard-context" / "src"))
+sys.path.insert(0, str(ROOT / "presentation-context" / "src"))
+sys.path.insert(0, str(ROOT / "tableau-identity" / "src"))
 sys.path.insert(0, str(ROOT / "bootstrap"))

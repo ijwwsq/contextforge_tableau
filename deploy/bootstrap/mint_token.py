@@ -11,7 +11,8 @@ Usage:
 Env (all inherited from the compose file):
     JWT_SECRET_KEY, JWT_ALGORITHM, JWT_AUDIENCE, JWT_ISSUER
     ADMIN_EMAIL              (defaults to admin@example.com)
-    TOKEN_EXPIRY_SECONDS     (defaults to 30 days)
+    TOKEN_EXPIRY_SECONDS     `0` или не задан → бессрочный токен (default).
+                             Любое положительное значение — TTL в секундах.
 """
 from __future__ import annotations
 
@@ -21,7 +22,8 @@ from register import mint_admin_token
 
 
 def main() -> None:
-    ttl = int(os.environ.get("TOKEN_EXPIRY_SECONDS", 60 * 60 * 24 * 30))
+    # 0 = бессрочный (без exp-клейма). Именно это и хочет админ по умолчанию.
+    ttl = int(os.environ.get("TOKEN_EXPIRY_SECONDS", 0))
     print(mint_admin_token(expiry_seconds=ttl))
 
 

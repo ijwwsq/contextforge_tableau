@@ -10,6 +10,7 @@ import pytest
 
 import register
 import mint_token
+import provision_user
 
 
 # ---------------------------------------------------------------- JWT
@@ -52,6 +53,106 @@ def test_mint_token_script_reads_expiry_env(
     out = capsys.readouterr().out.strip()
     decoded = jwt.decode(out, "s" * 32, algorithms=["HS256"], audience="aud", issuer="iss")
     assert decoded["exp"] - decoded["iat"] == 120
+
+
+def test_mint_token_script_defaults_to_no_expiry(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _base_env(monkeypatch)
+    monkeypatch.delenv("TOKEN_EXPIRY_SECONDS", raising=False)
+    mint_token.main()
+    out = capsys.readouterr().out.strip()
+    # options={"verify_exp": False}: exp-клейма быть не должно вовсе, но jwt.decode
+    # без него всё равно валиден — проверяем по payload напрямую.
+    decoded = jwt.decode(out, "s" * 32, algorithms=["HS256"], audience="aud", issuer="iss")
+    assert "exp" not in decoded
+
+
+def test_mint_user_token_is_not_admin(monkeypatch: pytest.MonkeyPatch) -> None:
+    _base_env(monkeypatch)
+    token = register.mint_user_token("alice@corp")
+    decoded = jwt.decode(token, "s" * 32, algorithms=["HS256"], audience="aud", issuer="iss")
+    assert decoded["sub"] == "alice@corp"        # sub = личность для tableau-identity
+    assert decoded["is_admin"] is False          # обычный пользователь, не admin-bypass
+    assert "exp" not in decoded                  # по умолчанию бессрочный
+
+
+def test_mint_admin_token_zero_expiry_has_no_exp(monkeypatch: pytest.MonkeyPatch) -> None:
+    _base_env(monkeypatch)
+    token = register.mint_admin_token(expiry_seconds=0)
+    decoded = jwt.decode(token, "s" * 32, algorithms=["HS256"], audience="aud", issuer="iss")
+    assert "exp" not in decoded
+    assert decoded["is_admin"] is True  # bypass-клеймы никуда не делись
+
+
+# ---------------------------------------------------------------- Провижининг юзера (1.1)
+
+
+def test_provision_create_user_new_and_existing(capsys: pytest.CaptureFixture[str]) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/auth/email/admin/users"
+        import json
+        seen.append(json.loads(request.content))
+        return httpx.Response(201, json={"email": "alice@corp"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as c:
+        provision_user.create_user(c, "http://gw", {}, "alice@corp", "pw12345678")
+    # Тело — реальные поля AdminCreateUserRequest, is_admin=False (обычный юзер).
+    assert seen[0]["email"] == "alice@corp"
+    assert seen[0]["is_admin"] is False
+
+    def handler409(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"detail": "already exists"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler409)) as c:
+        provision_user.create_user(c, "http://gw", {}, "alice@corp", "pw")  # не бросает
+
+
+def test_provision_assign_role_resolves_id() -> None:
+    calls: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/rbac/roles":
+            return httpx.Response(200, json=[{"id": "r-1", "name": "developer"}, {"id": "r-2", "name": "viewer"}])
+        if request.method == "POST" and request.url.path == "/rbac/users/alice@corp/roles":
+            import json
+            calls["body"] = json.loads(request.content)
+            return httpx.Response(201, json={})
+        raise AssertionError(request.url)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as c:
+        provision_user.assign_role(c, "http://gw", {}, "alice@corp", "developer")
+    assert calls["body"]["role_id"] == "r-1"  # имя роли → её id
+    assert calls["body"]["scope"] == "global"
+
+
+def test_provision_assign_role_unknown_raises() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"id": "r-2", "name": "viewer"}])
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as c:
+        with pytest.raises(SystemExit, match="не найдена"):
+            provision_user.assign_role(c, "http://gw", {}, "alice@corp", "developer")
+
+
+def test_provision_issue_token_returns_sub_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TOKEN_EXPIRES_IN_DAYS", raising=False)
+    body_seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST" and request.url.path == "/tokens"
+        import json
+        body_seen.update(json.loads(request.content))
+        return httpx.Response(201, json={"access_token": "PERSONAL-TOKEN"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as c:
+        tok = provision_user.issue_token(c, "http://gw", {}, "alice@corp")
+    assert tok == "PERSONAL-TOKEN"
+    # admin-делегация: выпускаем ЗА пользователя, его email — в user_email.
+    assert body_seen["user_email"] == "alice@corp"
 
 
 # ---------------------------------------------------------------- Регистрация

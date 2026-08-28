@@ -2,3 +2,9 @@
 *.pyc
 __pycache__/
 .venv/
+
+# Реальные привязки с зашифрованными PAT-секретами — не в git (только .example).
+tableau-identity/catalog/mappings.yml
+
+# Билд-артефакт (docker save образов) — не в git, тянет за 100МБ лимит GitHub.
+local-images.tar.gz

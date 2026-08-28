@@ -1,0 +1,10 @@
+# Пример файла привязок. Реальный mappings.yml создаётся админкой
+# (tableau-identity-admin) и НЕ коммитится — pat_secret_enc хранит зашифрованный
+# PAT, ключ шифрования — в TABLEAU_IDENTITY_ENC_KEY.
+#
+# Структура (pat_secret_enc заполняет админка, руками не редактировать):
+mappings:
+  - user: alice@example.com          # sub из токена ИИ-пользователя (обычно email)
+    tableau_username: alice@example.com  # имя учётной записи в Tableau
+    pat_name: alice-mcp              # имя персонального PAT
+    pat_secret_enc: gAAAAAB...       # Fernet-шифртекст секрета PAT

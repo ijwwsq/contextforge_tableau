@@ -3,7 +3,8 @@ name: ibm-mcp-stack
 # Top-level compose for the Tableau MCP gateway stack.
 #
 # Includes ContextForge's base compose (gateway + postgres + redis + nginx),
-# adds two federated MCP servers (Tableau MCP, dashboard-context) and a
+# adds three federated MCP servers (Tableau MCP, dashboard-context,
+# presentation-context) and a
 # one-shot bootstrap job that registers them with the gateway.
 #
 # Run:
@@ -34,6 +35,13 @@ services:
       # so operators can rotate the seed password without patching the include.
       PLATFORM_ADMIN_PASSWORD: ${PLATFORM_ADMIN_PASSWORD}
       DEFAULT_USER_PASSWORD: ${PLATFORM_ADMIN_PASSWORD}
+      # Аудит: base compose жёстко ставит эти три флага в false и игнорирует .env.
+      # Пробрасываем свои значения — включает persistent audit trail (кто/что/когда
+      # дёргал tool или API-ручку) в Postgres гейта и открывает /api/logs/* для
+      # запросов. По умолчанию off — включается через .env, если нужен compliance.
+      STRUCTURED_LOGGING_DATABASE_ENABLED: ${STRUCTURED_LOGGING_DATABASE_ENABLED:-false}
+      AUDIT_TRAIL_ENABLED: ${AUDIT_TRAIL_ENABLED:-false}
+      SECURITY_LOGGING_ENABLED: ${SECURITY_LOGGING_ENABLED:-false}
 
   migration:
     build: !reset null
@@ -46,6 +54,30 @@ services:
   postgres:
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+  # Base compose публикует redis на хост-порт 6379. Гейт ходит в redis по
+  # внутреннему DNS (redis:6379), хост-публикация не нужна и конфликтует с любым
+  # другим redis на машине. Снимаем публикацию — redis остаётся внутри сети.
+  redis:
+    ports: !reset []
+
+  # Демо-серверы из base compose ContextForge (не используем — образы за
+  # ghcr.io/ibm, а на боевом сервере часто нет trust'а к их TLS-цепочке).
+  # Профиль "demo" по умолчанию не активируется — сервисы не стартуют.
+  fast_time_server:
+    profiles: ["demo"]
+  register_fast_time:
+    profiles: ["demo"]
+  register_fast_time_sse:
+    profiles: ["demo"]
+
+  # Base compose собирает nginx из UBI, который тянется с registry.access.redhat.com.
+  # На боевом сервере (KZ MITM) TLS-цепочка не проходит, поэтому переключаемся на
+  # уже локально загруженный образ (docker load -i nginx.tar) и отключаем build.
+  nginx:
+    build: !reset null
+    image: mcpgateway/nginx-cache:latest
+    pull_policy: missing
 
   # ─────────────────────────────────────────────────────────────
   # Official Tableau MCP server, HTTP transport.
@@ -84,6 +116,12 @@ services:
       # Первая итерация: пропускаем OAuth 2.1 и работаем с PAT-only на стороне сервера.
       # Следующая итерация — прокидываем OAUTH_ISSUER на наш IdP и убираем этот флаг.
       - DANGEROUSLY_DISABLE_OAUTH=${TABLEAU_DISABLE_OAUTH:-true}
+      # Per-user режим: принимаем session-token в заголовке x-tableau-auth, который
+      # ставит брокер tableau-identity (обменяв персональный PAT юзера). Запрос без
+      # заголовка (хендшейк/tools-list от гейта) проходит без Tableau-креды. Реальные
+      # tool-вызовы для непривязанных юзеров режет брокер — до общего PAT они не
+      # доходят (см. tableau-identity). PAT_* ниже нужен только для старта сервера.
+      - ENABLE_PASSTHROUGH_AUTH=true
     healthcheck:
       test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3927/tableau-mcp',r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))\""]
       interval: 30s
@@ -151,7 +189,114 @@ services:
       start_period: 15s
 
   # ─────────────────────────────────────────────────────────────
-  # One-shot bootstrap: waits for gateway, registers both MCP servers.
+  # tableau-identity (брокер): стоит в пути федерации ПЕРЕД tableau-mcp.
+  # На каждый tool-вызов достаёт личность юзера из проброшенного гейтом токена,
+  # берёт его персональный PAT из зашифрованного маппинга, логинится в Tableau и
+  # подставляет session-token в x-tableau-auth. Так вызовы идут от имени личной
+  # учётки (RLS) — ТС 5.4.2. Гейт регистрирует ИМЕННО этот сервис как `tableau`.
+  # ─────────────────────────────────────────────────────────────
+  tableau-identity:
+    build: ./tableau-identity
+    image: local/tableau-identity:0.1.0
+    restart: unless-stopped
+    networks: [mcpnet]
+    environment:
+      - HTTP_PORT=8020
+      - BROKER_BASE_PATH=/tableau-mcp
+      - TABLEAU_MCP_URL=http://tableau-mcp:3927/tableau-mcp   # upstream (реальный MCP)
+      - TABLEAU_SERVER=${TABLEAU_SERVER}
+      - TABLEAU_SITE_NAME=${TABLEAU_SITE_NAME}
+      - TABLEAU_API_VERSION=${TABLEAU_API_VERSION:-3.22}
+      # on-prem Tableau Server: true (дефолт) / false / путь к CA-bundle внутри контейнера.
+      - TABLEAU_SSL_VERIFY=${TABLEAU_SSL_VERIFY:-true}
+      - TABLEAU_SESSION_TTL_SECONDS=${TABLEAU_SESSION_TTL_SECONDS:-13800}
+      - MAPPINGS_PATH=/app/catalog/mappings.yml
+      - TABLEAU_IDENTITY_ENC_KEY=${TABLEAU_IDENTITY_ENC_KEY}
+      # Валидация проброшенного gateway-JWT (личность юзера). По умолчанию — тем же
+      # секретом, что и гейт; claim личности — sub.
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - IDENTITY_CLAIM=${IDENTITY_CLAIM:-sub}
+      - IDENTITY_JWT_AUDIENCE=${IDENTITY_JWT_AUDIENCE:-}
+      - IDENTITY_JWT_ISSUER=${IDENTITY_JWT_ISSUER:-}
+    volumes:
+      - ./tableau-identity/catalog:/app/catalog:ro
+    depends_on:
+      tableau-mcp:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8020/healthz',timeout=3).status==200 else sys.exit(1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # Админка 1:1-маппинга (ТС 5.6.2): владеет mappings.yml (rw), шифрует PAT-секреты.
+  tableau-identity-admin:
+    build: ./tableau-identity
+    image: local/tableau-identity:0.1.0
+    restart: unless-stopped
+    networks: [mcpnet]
+    command: ["python", "-m", "tableau_identity.admin"]
+    environment:
+      - HTTP_PORT=8021
+      - MAPPINGS_PATH=/app/catalog/mappings.yml
+      - TABLEAU_IDENTITY_ENC_KEY=${TABLEAU_IDENTITY_ENC_KEY}
+      - IDENTITY_ADMIN_USER=${IDENTITY_ADMIN_USER:-admin}
+      - IDENTITY_ADMIN_PASSWORD=${IDENTITY_ADMIN_PASSWORD}
+    ports:
+      - "${IDENTITY_ADMIN_PORT:-8021}:8021"
+    volumes:
+      - ./tableau-identity/catalog:/app/catalog:rw
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8021/healthz',timeout=3).status==200 else sys.exit(1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  presentation-context:
+    build: ./presentation-context
+    image: local/presentation-context:0.1.0
+    restart: unless-stopped
+    networks: [mcpnet]
+    environment:
+      - GUIDELINES_URL=http://presentation-context-admin:8011/api/guidelines
+      - HTTP_PORT=8000
+    depends_on:
+      presentation-context-admin:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health',timeout=3).status==200 else sys.exit(1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  presentation-context-admin:
+    build: ./presentation-context
+    image: local/presentation-context:0.1.0
+    restart: unless-stopped
+    networks: [mcpnet]
+    command: ["python", "-m", "presentation_context.admin"]
+    environment:
+      - GUIDELINES_PATH=/app/catalog/presentation-guidelines.yml
+      - HTTP_PORT=8011
+      - PRESENTATION_ADMIN_USER=${PRESENTATION_ADMIN_USER:-admin}
+      - PRESENTATION_ADMIN_PASSWORD=${PRESENTATION_ADMIN_PASSWORD}
+    ports:
+      - "${PRESENTATION_ADMIN_PORT:-8011}:8011"
+    volumes:
+      - ./presentation-context/catalog:/app/catalog:rw
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8011/healthz',timeout=3).status==200 else sys.exit(1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ─────────────────────────────────────────────────────────────
+  # One-shot bootstrap: waits for gateway and registers all MCP servers.
   # Idempotent: re-running is safe (409 on duplicates is ignored).
   # ─────────────────────────────────────────────────────────────
   bootstrap:
@@ -162,9 +307,11 @@ services:
     depends_on:
       gateway:
         condition: service_healthy
-      tableau-mcp:
+      tableau-identity:
         condition: service_started
       dashboard-context:
+        condition: service_started
+      presentation-context:
         condition: service_started
     environment:
       - GATEWAY_URL=http://gateway:4444
@@ -173,5 +320,8 @@ services:
       - JWT_AUDIENCE=${JWT_AUDIENCE:-mcpgateway-api}
       - JWT_ISSUER=${JWT_ISSUER:-mcpgateway}
       - ADMIN_EMAIL=${PLATFORM_ADMIN_EMAIL:-admin@example.com}
-      - TABLEAU_MCP_URL=http://tableau-mcp:3927/tableau-mcp
+      # Как `tableau` регистрируем БРОКЕР tableau-identity, а не сам tableau-mcp:
+      # он подставляет per-user session-token. Upstream к реальному MCP — внутри брокера.
+      - TABLEAU_MCP_URL=http://tableau-identity:8020/tableau-mcp
       - DASHBOARD_CONTEXT_URL=http://dashboard-context:8000/mcp
+      - PRESENTATION_CONTEXT_URL=http://presentation-context:8000/mcp
