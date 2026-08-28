@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import re
+import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -48,8 +50,59 @@ def _load() -> CommentedMap:
     return data
 
 
+# Версионирование бизнес-контекста (ТС 4.5 / 5.6.3): каждый save снимает копию
+# текущего файла в history/ ПЕРЕД перезаписью. Файловая история — без БД и
+# внешних зависимостей (проект таргетит air-gapped-деплой). Восстановление —
+# копирование версии обратно (само тоже снимает снимок, поэтому обратимо).
+HISTORY_KEEP = int(os.environ.get("CONTEXT_HISTORY_KEEP", "50"))
+# 20260828T101530123456Z — с микросекундами: без коллизий при частых сохранениях,
+# лексикографический порядок = хронологический. Заодно защита от path traversal.
+_VERSION_FMT = "%Y%m%dT%H%M%S%fZ"
+_VERSION_RE = re.compile(r"^\d{8}T\d{12}Z$")
+
+
+def _history_dir() -> Path:
+    d = _catalog_path().parent / "history"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _snapshot_current() -> None:
+    """Снимок текущего каталога перед перезаписью (история изменений)."""
+    src = _catalog_path()
+    if not src.exists():
+        return
+    ts = datetime.now(timezone.utc).strftime(_VERSION_FMT)
+    dst = _history_dir() / f"dashboards.{ts}.yml"
+    if not dst.exists():
+        shutil.copy2(src, dst)
+    _prune_history()
+
+
+def _prune_history() -> None:
+    if HISTORY_KEEP <= 0:
+        return
+    versions = sorted(_history_dir().glob("dashboards.*.yml"))
+    for old in versions[:-HISTORY_KEEP]:
+        old.unlink(missing_ok=True)
+
+
+def _list_versions() -> list[str]:
+    """Версии (id = метка времени) от новых к старым."""
+    ids = [p.name[len("dashboards."):-len(".yml")] for p in _history_dir().glob("dashboards.*.yml")]
+    return sorted((v for v in ids if _VERSION_RE.match(v)), reverse=True)
+
+
+def _version_path(version: str) -> Path | None:
+    if not _VERSION_RE.match(version):
+        return None
+    p = _history_dir() / f"dashboards.{version}.yml"
+    return p if p.exists() else None
+
+
 def _save(data: CommentedMap) -> None:
     path = _catalog_path()
+    _snapshot_current()  # сохраняем предыдущее состояние в историю
     tmp = path.with_suffix(".yml.tmp")
     with tmp.open("w", encoding="utf-8", newline="\n") as f:
         _yaml.dump(data, f)
@@ -300,6 +353,7 @@ _PAGE = """<!doctype html>
     <div><h1>dashboard-context</h1><div class="sub">Catalog admin</div></div>
   </div>
   <div style="display:flex; gap:.5rem;">
+    <a class="btn" href="/history" title="История изменений каталога">History</a>
     <a class="btn" href="/api/export" title="Скачать весь каталог как YAML">Download YAML</a>
     <a class="btn primary" href="/new">+ New dashboard</a>
   </div>
@@ -519,6 +573,64 @@ async def _delete_post(request: Request) -> RedirectResponse:
     if idx >= 0:
         del data["dashboards"][idx]
         _save(data)
+    return RedirectResponse("/", status_code=303)
+
+
+# ---------------------------------------------------------------- версии (история)
+
+def _fmt_version(v: str) -> str:
+    try:
+        dt = datetime.strptime(v, _VERSION_FMT)
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    except ValueError:
+        return v
+
+
+def _history_body() -> str:
+    versions = _list_versions()
+    if not versions:
+        return (
+            '<div class="breadcrumb"><a class="btn ghost" href="/">← All dashboards</a></div>'
+            '<div class="card"><div class="empty">История пуста — она наполняется при каждом сохранении.</div></div>'
+        )
+    rows = []
+    for v in versions:
+        vh = html.escape(v)
+        rows.append(
+            f"<tr><td>{html.escape(_fmt_version(v))}</td>"
+            f"<td class='mono'>{vh}</td>"
+            f"<td><a class='btn ghost' href='/history/{vh}'>View YAML</a>"
+            f"<form method='post' action='/history/{vh}/restore' style='display:inline'>"
+            "<button onclick=\"return confirm('Восстановить эту версию каталога? Текущая уйдёт в историю.')\">Restore</button>"
+            "</form></td></tr>"
+        )
+    return f"""
+    <div class="breadcrumb"><a class="btn ghost" href="/">← All dashboards</a></div>
+    <div class="card"><table class="list">
+      <thead><tr><th>Когда (UTC)</th><th>Версия</th><th></th></tr></thead>
+      <tbody>{''.join(rows)}</tbody>
+    </table></div>
+    <p class="count">{len(versions)} версий в истории (хранятся последние {HISTORY_KEEP}).</p>
+    """
+
+
+async def _history_get(_request: Request) -> HTMLResponse:
+    return _render("История каталога", _history_body())
+
+
+async def _history_download(request: Request) -> Response:
+    p = _version_path(request.path_params["version"])
+    if p is None:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    return Response(p.read_text(encoding="utf-8"), media_type="text/plain; charset=utf-8")
+
+
+async def _history_restore(request: Request) -> RedirectResponse:
+    p = _version_path(request.path_params["version"])
+    if p is None:
+        return RedirectResponse("/history", status_code=303)
+    _snapshot_current()  # текущее состояние — в историю, чтобы restore был обратим
+    shutil.copy2(p, _catalog_path())
     return RedirectResponse("/", status_code=303)
 
 
@@ -755,6 +867,9 @@ def build_app() -> Any:
             Route("/edit/{key}", _edit_get, methods=["GET"]),
             Route("/edit/{key}", _edit_post, methods=["POST"]),
             Route("/delete/{key}", _delete_post, methods=["POST"]),
+            Route("/history", _history_get, methods=["GET"]),
+            Route("/history/{version}", _history_download, methods=["GET"]),
+            Route("/history/{version}/restore", _history_restore, methods=["POST"]),
             Route("/healthz", _healthz, methods=["GET"]),
             Route("/api/dashboards", _api_list, methods=["GET"]),
             Route("/api/dashboards", _api_create, methods=["POST"]),

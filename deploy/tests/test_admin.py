@@ -396,3 +396,53 @@ def test_edit_get_unknown_key_is_graceful(client: TestClient) -> None:
     r = client.get("/edit/nope", headers=_basic())
     assert r.status_code == 200
     assert "No dashboard" in r.text
+
+
+# ---------------------------------------------------------------- версионирование (ТС 5.6.3)
+
+
+def _edit_owner(client: TestClient, owner: str) -> None:
+    client.post(
+        "/edit/sales", headers=_basic(),
+        data={"luid": "aaa-111", "slug": "sales", "name": "Sales weekly", "owner": owner},
+        follow_redirects=False,
+    )
+
+
+def test_history_snapshot_on_save_and_restore(catalog_file: Path, client: TestClient) -> None:
+    assert "analytics@example.com" in catalog_file.read_text()
+
+    _edit_owner(client, "new@example.com")
+    assert "new@example.com" in catalog_file.read_text()
+
+    versions = admin._list_versions()
+    assert len(versions) == 1
+    # снимок хранит ПРЕЖНЕЕ состояние (до правки)
+    snap = admin._version_path(versions[0])
+    assert snap is not None and "analytics@example.com" in snap.read_text()
+
+    # восстановление возвращает прежнее и само уходит в историю (обратимо)
+    r = client.post(f"/history/{versions[0]}/restore", headers=_basic(), follow_redirects=False)
+    assert r.status_code == 303
+    assert "analytics@example.com" in catalog_file.read_text()
+    assert len(admin._list_versions()) == 2
+
+
+def test_history_download_and_auth(client: TestClient) -> None:
+    _edit_owner(client, "x@example.com")
+    v = admin._list_versions()[0]
+    assert client.get(f"/history/{v}").status_code == 401          # HTML/скачивание — под авторизацией
+    r = client.get(f"/history/{v}", headers=_basic())
+    assert r.status_code == 200 and "dashboards:" in r.text
+
+
+def test_history_version_path_rejects_traversal() -> None:
+    assert admin._version_path("../../etc/passwd") is None
+    assert admin._version_path("nope") is None
+
+
+def test_history_prune_keeps_last_n(catalog_file: Path, client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(admin, "HISTORY_KEEP", 2)
+    for i in range(4):
+        _edit_owner(client, f"o{i}@example.com")
+    assert len(admin._list_versions()) == 2  # хранятся только последние 2

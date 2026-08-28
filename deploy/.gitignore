@@ -8,3 +8,6 @@ tableau-identity/catalog/mappings.yml
 
 # Билд-артефакт (docker save образов) — не в git, тянет за 100МБ лимит GitHub.
 local-images.tar.gz
+
+# История версий бизнес-контекста (наполняется в рантайме админкой).
+dashboard-context/catalog/history/
