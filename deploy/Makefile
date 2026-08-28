@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: up up-identity down down-heavy restart logs ps register health mcp-list token claude-config clean test test-deps identity-key user-token provision-user map-pat
+.PHONY: up up-identity down down-heavy restart logs ps register health mcp-list token claude-config clean test test-deps identity-key user-token provision-user provision-roles map-pat
 
 up:  ## Bring up the full stack (gateway + Tableau, dashboard and presentation context + bootstrap).
 	docker compose up -d --build
@@ -35,7 +35,10 @@ mcp-list:  ## Show federated gateways registered in ContextForge.
 token:  ## Mint an admin JWT for MCP clients (default: no exp — never expires; TOKEN_EXPIRY_SECONDS=N to set TTL in seconds).
 	@docker compose run --rm --no-deps -e TOKEN_EXPIRY_SECONDS --entrypoint python bootstrap /app/mint_token.py
 
-provision-user:  ## БОЕВОЙ: завести юзера в гейте + выпустить его личный API-токен. make provision-user EMAIL=alice@corp PASSWORD=secret [ROLE=developer] [DAYS=90]
+provision-roles:  ## Создать 4 роли RBAC из ТС (idempotent): mcp-platform-admin/access-admin/analyst/user.
+	@docker compose run --rm --no-deps --entrypoint python bootstrap /app/provision_roles.py
+
+provision-user:  ## БОЕВОЙ: завести юзера в гейте + выпустить его личный API-токен. make provision-user EMAIL=alice@corp PASSWORD=secret [ROLE=mcp-user] [DAYS=90]
 	@test -n "$(EMAIL)" -a -n "$(PASSWORD)" || { echo "нужны EMAIL и PASSWORD, напр. make provision-user EMAIL=alice@corp PASSWORD=secret"; exit 1; }
 	@docker compose run --rm --no-deps \
 	  -e USER_EMAIL="$(EMAIL)" -e USER_PASSWORD="$(PASSWORD)" -e USER_ROLE="$(ROLE)" -e TOKEN_EXPIRES_IN_DAYS="$(DAYS)" \

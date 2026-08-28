@@ -192,9 +192,11 @@ error»*. Отсюда три следствия, зашитые в `tableau_aut
 3. Открыть админку `http://localhost:8021/` (Basic-auth), завести привязки:
    *пользователь (sub, обычно email) → учётка Tableau + её персональный PAT*.
    PAT ложится в `mappings.yml` зашифрованным.
-4. Завести пользователя и выдать ему **личный API-токен** (боевой путь):
+4. Однократно — создать 4 роли RBAC из ТС, затем завести пользователя и выдать
+   ему **личный API-токен** (боевой путь):
    ```
-   make provision-user EMAIL=alice@corp PASSWORD=<пароль> [ROLE=developer] [DAYS=90]
+   make provision-roles                                         # один раз на стенд
+   make provision-user EMAIL=alice@corp PASSWORD=<пароль> ROLE=mcp-user [DAYS=90]
    ```
    Скрипт через реальные эндпоинты гейта создаёт пользователя
    (`POST /auth/email/admin/users`), опц. назначает роль

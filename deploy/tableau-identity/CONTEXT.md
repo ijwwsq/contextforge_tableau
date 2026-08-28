@@ -90,11 +90,12 @@
 ## 5. Операторский цикл (на одного пользователя)
 
 ```bash
-# 0) однократно: ключ шифрования PAT в .env
+# 0) однократно: ключ шифрования PAT в .env + 4 роли RBAC из ТС
 make identity-key                      # → TABLEAU_IDENTITY_ENC_KEY=...
+make provision-roles                   # mcp-platform-admin/access-admin/analyst/user
 
 # 1) завести юзера в гейте + выпустить его личный API-токен (+сниппет Claude)
-make provision-user EMAIL=alice@corp PASSWORD=Secret123 ROLE=developer DAYS=90
+make provision-user EMAIL=alice@corp PASSWORD=Secret123 ROLE=mcp-user DAYS=90
 
 # 2) закинуть его PAT в tableau-identity (секрет вводится скрыто)
 make map-pat EMAIL=alice@corp TABLEAU_USER=alice@corp PAT_NAME=alice-mcp
@@ -126,11 +127,14 @@ PAT можно завести и руками в UI: `http://localhost:8021/` (B
 
 ## 7. Что осталось (роадмап)
 
-1. **1.2 — 4 роли RBAC ТС** (Администратор платформы / Администратор доступа /
-   Бизнес-аналитик / Конечный пользователь). Встроенные роли гейта:
-   `platform_admin/team_admin/developer/viewer` + гранулярные права + скоуп по
-   командам. Без роли с правом вызова инструментов не-admin юзер к серверу
-   `tableau` не пройдёт. `provision_user` уже принимает `ROLE=`.
+1. **1.2 — 4 роли RBAC ТС — СДЕЛАНО (код).** `bootstrap/provision_roles.py` +
+   `make provision-roles` идемпотентно создают least-privilege роли:
+   `mcp-platform-admin` (серверы/тулы/мониторинг), `mcp-access-admin`
+   (юзеры/роли/токены), `mcp-analyst` (чтение+вызов), `mcp-user` (Конечный
+   пользователь — только `servers.use`+`tools.execute`, без create/delete).
+   Свои, а не встроенный `developer`, т.к. тот даёт юзеру ещё и delete/create на
+   инструментах. Осталось: прогнать на живом гейте + проверить, что `mcp-user`
+   реально пускает к серверу `tableau` (упирается в полный стек).
 2. **1.4 — доступ к админкам** (`tableau-identity-admin`,
    `dashboard-context-admin`) в единой RBAC-модели: сейчас отдельный Basic-auth,
    наружу через nginx не проброшены. Решить: проброс через гейт vs Basic-auth по

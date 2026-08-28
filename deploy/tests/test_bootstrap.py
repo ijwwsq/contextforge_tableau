@@ -11,6 +11,7 @@ import pytest
 import register
 import mint_token
 import provision_user
+import provision_roles
 
 
 # ---------------------------------------------------------------- JWT
@@ -153,6 +154,42 @@ def test_provision_issue_token_returns_sub_email(monkeypatch: pytest.MonkeyPatch
     assert tok == "PERSONAL-TOKEN"
     # admin-делегация: выпускаем ЗА пользователя, его email — в user_email.
     assert body_seen["user_email"] == "alice@corp"
+
+
+# ---------------------------------------------------------------- Роли RBAC (1.2)
+
+
+def test_roles_definitions_cover_tc_and_end_user_can_execute() -> None:
+    names = {r["name"] for r in provision_roles.ROLES}
+    assert names == {"mcp-platform-admin", "mcp-access-admin", "mcp-analyst", "mcp-user"}
+    # Критично: конечный юзер МОЖЕТ звать инструменты, но НЕ может их портить.
+    user = next(r for r in provision_roles.ROLES if r["name"] == "mcp-user")
+    assert "tools.execute" in user["permissions"] and "servers.use" in user["permissions"]
+    for destructive in ("tools.delete", "tools.create", "servers.delete", "gateways.create"):
+        assert destructive not in user["permissions"], f"{destructive} не должно быть у mcp-user"
+
+
+def test_provision_roles_creates_missing_skips_existing(capsys: pytest.CaptureFixture[str]) -> None:
+    created: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/rbac/roles":
+            return httpx.Response(200, json=[{"name": "mcp-user"}])  # одна уже есть
+        if request.method == "POST" and request.url.path == "/rbac/roles":
+            import json
+            created.append(json.loads(request.content)["name"])
+            return httpx.Response(201, json={})
+        raise AssertionError(request.url)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as c:
+        h = {"Authorization": "Bearer x"}
+        have = provision_roles.existing_role_names(c, "http://gw", h)
+        for role in provision_roles.ROLES:
+            if role["name"] not in have:
+                provision_roles.create_role(c, "http://gw", h, role)
+    # mcp-user пропущена, остальные три созданы.
+    assert "mcp-user" not in created
+    assert set(created) == {"mcp-platform-admin", "mcp-access-admin", "mcp-analyst"}
 
 
 # ---------------------------------------------------------------- Регистрация
