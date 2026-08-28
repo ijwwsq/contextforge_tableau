@@ -692,53 +692,73 @@ _BLOCK_LIST_FIELDS = ("description", "how_built", "notes", "kpis", "glossary")
 
 
 def _entry_history_body(key: str, current: dict[str, Any]) -> str:
-    """Таймлайн изменений конкретной записи — что отличалось от текущего состояния."""
+    """История версий карточки в виде git-ветки: HEAD (текущая) сверху, ниже —
+    прошлые состояния на общей линии; у каждой видно что менялось + Restore."""
     history = _entry_history(key)
     if not history:
-        return ""  # изменений ещё не было — таймлайна нет
+        return ""  # изменений ещё не было — ветки нет
 
-    nodes = []
+    nodes = ["""
+      <div class="vnode vnode--head">
+        <span class="vdot"></span>
+        <div class="vcard">
+          <div class="vrow"><span class="vref">HEAD · текущая версия</span></div>
+        </div>
+      </div>"""]
+
     for version, when, ed in history:
-        changed = []
+        changed_names = [f for f in (*_SCALAR_FIELDS, *_BLOCK_LIST_FIELDS) if ed.get(f) != current.get(f)]
+        msg = ("изменено: " + ", ".join(html.escape(n) for n in changed_names)) if changed_names \
+            else "без изменений полей"
+        details = []
         for f in _SCALAR_FIELDS:
             if ed.get(f) != current.get(f):
-                was = html.escape(str(ed.get(f) or "—"))
-                changed.append(f"<span class='pill'>{f}</span> было: <b>{was}</b>")
+                details.append(f"<span class='vk'>{f}</span> <span class='vold'>{html.escape(str(ed.get(f) or '—'))}</span>")
         for f in _BLOCK_LIST_FIELDS:
             if ed.get(f) != current.get(f):
-                changed.append(f"<span class='pill'>{f}</span> изменено")
-        diff = " &nbsp; ".join(changed) if changed else "<span class='muted'>совпадает с текущей версией</span>"
+                details.append(f"<span class='vk'>{f}</span> <span class='vold'>изменено</span>")
+        detail_html = f'<div class="vdetail">{" · ".join(details)}</div>' if details else ""
         vh = html.escape(version)
+        short = vh[-6:] if len(vh) > 6 else vh
         nodes.append(f"""
-        <div class="tl-item">
-          <div class="tl-dot"></div>
-          <div class="tl-node">
-            <div class="tl-head">
-              <span class="tl-time">{html.escape(when)}</span>
+        <div class="vnode">
+          <span class="vdot"></span>
+          <div class="vcard">
+            <div class="vrow">
+              <span class="vhash">#{short}</span>
+              <span class="vtime">{html.escape(when)}</span>
               <form method="post" action="/edit/{html.escape(key)}/restore/{vh}" style="margin:0">
-                <button onclick="return confirm('Восстановить эту запись к данной версии? Текущее уйдёт в историю.')">Restore</button>
+                <button class="vrestore" onclick="return confirm('Восстановить карточку к этой версии? Текущее уйдёт в историю.')">Restore</button>
               </form>
             </div>
-            <div class="tl-diff">{diff}</div>
+            <div class="vmsg">{msg}</div>
+            {detail_html}
           </div>
         </div>""")
 
     return f"""
     <style>
-      .timeline {{ position: relative; margin-left: .4rem; padding-left: 1.2rem; }}
-      .timeline::before {{ content:""; position:absolute; left:4px; top:4px; bottom:4px; width:2px; background:var(--border); }}
-      .tl-item {{ position: relative; margin-bottom: 1rem; }}
-      .tl-item:last-child {{ margin-bottom: 0; }}
-      .tl-dot {{ position:absolute; left:-1.2rem; top:5px; width:10px; height:10px; border-radius:50%;
-                 background:var(--accent-content); box-shadow:0 0 0 3px color-mix(in srgb,var(--accent-content) 22%,transparent); }}
-      .tl-head {{ display:flex; align-items:center; justify-content:space-between; gap:.6rem; }}
-      .tl-time {{ font-family:ui-monospace,monospace; font-size:.82rem; color:var(--text-muted); }}
-      .tl-diff {{ margin-top:.35rem; font-size:.85rem; line-height:1.9; }}
+      .vgraph{{position:relative;margin:6px 0 0;padding-left:26px}}
+      .vgraph::before{{content:"";position:absolute;left:6px;top:9px;bottom:9px;width:2px;background:#e0e0de}}
+      .vnode{{position:relative;margin-bottom:14px}}.vnode:last-child{{margin-bottom:0}}
+      .vdot{{position:absolute;left:-26px;top:6px;width:11px;height:11px;border-radius:50%;background:#2383e2;box-shadow:0 0 0 3px #ffffff}}
+      .vnode--head .vdot{{background:#2f9e44}}
+      .vcard{{background:#f7f7f5;border:1px solid #e9e9e7;border-radius:8px;padding:9px 13px}}
+      .vnode--head .vcard{{background:#eef7f0;border-color:#cfe8d5}}
+      .vrow{{display:flex;align-items:center;gap:10px;flex-wrap:wrap}}
+      .vref{{font-weight:600;color:#2f9e44;font-size:.86rem}}
+      .vhash{{font-family:ui-monospace,monospace;font-size:.8rem;color:#2383e2;background:#eaf3fc;border:1px solid #d5e8fa;border-radius:4px;padding:1px 7px}}
+      .vtime{{font-family:ui-monospace,monospace;font-size:.78rem;color:#787774}}
+      .vrestore{{margin-left:auto;border:1px solid #e0e0de;background:#fff;color:#37352f;border-radius:6px;padding:3px 11px;font-size:.8rem;font-weight:600;cursor:pointer}}
+      .vrestore:hover{{border-color:#2383e2;color:#2383e2}}
+      .vmsg{{margin-top:5px;font-size:.9rem;color:#37352f}}
+      .vdetail{{margin-top:5px;font-size:.82rem;color:#787774;line-height:1.9}}
+      .vk{{font-family:ui-monospace,monospace;font-size:.76rem;background:#ececeb;border-radius:4px;padding:1px 6px;color:#37352f;margin-right:2px}}
     </style>
     <div class="section section--content">
-      <h2>История изменений</h2>
-      <div class="timeline">{''.join(nodes)}</div>
-      <div class="hint" style="margin-top:.8rem">Показаны точки изменения этой записи (последние {HISTORY_KEEP} снимков каталога). Значения — какими они были на тот момент.</div>
+      <h2>История версий</h2>
+      <div class="vgraph">{''.join(nodes)}</div>
+      <div class="hint" style="margin-top:10px">Ветка версий карточки: сверху HEAD — текущая, ниже прошлые состояния. «Restore» откатывает только эту карточку.</div>
     </div>
     """
 

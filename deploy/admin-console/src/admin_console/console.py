@@ -166,14 +166,9 @@ button.primary,.btn.primary,.addform .save,.save{background:#2383e2!important;bo
 .section{border-left-color:#e9e9e7!important}
 .pill{background:#f1f1ef!important;color:#787774!important}
 a{color:#2383e2!important}
-/* Красивый таймлайн истории записи (Notion-стиль поверх единой темы) */
-.timeline::before{background:#e9e9e7!important}
-.tl-dot{background:#2383e2!important;box-shadow:0 0 0 3px #ffffff!important;border-radius:50%!important}
-.tl-node{background:#f7f7f5!important;border:1px solid #e9e9e7!important;border-radius:8px!important;padding:10px 14px!important}
-.tl-time{color:#787774!important;font-family:ui-monospace,monospace!important}
-.tl-diff{line-height:2!important}
-.tl-diff .pill{background:#ececeb!important;color:#37352f!important;border:1px solid #e0e0de!important;border-radius:4px!important;padding:2px 7px!important}
-.tl-diff b{font-weight:600!important;color:#37352f!important}
+/* Ветка версий карточки: не даём единой теме погасить кольца точек */
+.vdot{box-shadow:0 0 0 3px #ffffff!important}
+.vgraph::before{background:#e0e0de!important}
 .section h2{color:#787774!important}
 </style>"""
 

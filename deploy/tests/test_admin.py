@@ -454,7 +454,7 @@ def test_entry_history_timeline_and_pointwise_restore(catalog_file: Path, client
 
     # таймлайн показывается на странице конкретной записи
     page = client.get("/edit/sales", headers=_basic()).text
-    assert "<h2>История изменений</h2>" in page
+    assert "<h2>История версий</h2>" in page
 
     # история записи содержит прошлые состояния (точки изменения)
     hist = admin._entry_history("sales")
@@ -470,4 +470,4 @@ def test_entry_history_timeline_and_pointwise_restore(catalog_file: Path, client
 
 def test_entry_history_hidden_when_no_changes(client: TestClient) -> None:
     # у свежей записи без правок таймлайна нет (в title топбара строка есть — проверяем h2 панели)
-    assert "<h2>История изменений</h2>" not in client.get("/edit/sales", headers=_basic()).text
+    assert "<h2>История версий</h2>" not in client.get("/edit/sales", headers=_basic()).text
