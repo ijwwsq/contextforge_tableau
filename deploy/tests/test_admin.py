@@ -446,3 +446,28 @@ def test_history_prune_keeps_last_n(catalog_file: Path, client: TestClient, monk
     for i in range(4):
         _edit_owner(client, f"o{i}@example.com")
     assert len(admin._list_versions()) == 2  # хранятся только последние 2
+
+
+def test_entry_history_timeline_and_pointwise_restore(catalog_file: Path, client: TestClient) -> None:
+    _edit_owner(client, "v1@example.com")
+    _edit_owner(client, "v2@example.com")
+
+    # таймлайн показывается на странице конкретной записи
+    page = client.get("/edit/sales", headers=_basic()).text
+    assert "<h2>История изменений</h2>" in page
+
+    # история записи содержит прошлые состояния (точки изменения)
+    hist = admin._entry_history("sales")
+    assert len(hist) >= 2
+    oldest_version, oldest_state = hist[-1]
+    assert oldest_state["owner"] == "analytics@example.com"  # исходный owner из фикстуры
+
+    # точечный restore возвращает ТОЛЬКО эту запись к старой версии
+    r = client.post(f"/edit/sales/restore/{oldest_version}", headers=_basic(), follow_redirects=False)
+    assert r.status_code == 303
+    assert client.get("/api/dashboards/sales").json()["owner"] == "analytics@example.com"
+
+
+def test_entry_history_hidden_when_no_changes(client: TestClient) -> None:
+    # у свежей записи без правок таймлайна нет (в title топбара строка есть — проверяем h2 панели)
+    assert "<h2>История изменений</h2>" not in client.get("/edit/sales", headers=_basic()).text

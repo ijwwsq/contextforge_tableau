@@ -100,6 +100,36 @@ def _version_path(version: str) -> Path | None:
     return p if p.exists() else None
 
 
+def _entry_at(version: str, key: str) -> CommentedMap | None:
+    """Достать запись `key` из снимка каталога версии `version`."""
+    p = _version_path(version)
+    if p is None:
+        return None
+    try:
+        with p.open("r", encoding="utf-8", newline="") as f:
+            data = _yaml.load(f)
+    except Exception:
+        return None
+    return _find(data, key) if data else None
+
+
+def _entry_history(key: str) -> list[tuple[str, dict[str, Any]]]:
+    """История одной записи: список (версия, состояние) от новых к старым,
+    только точки изменения (подряд одинаковые состояния схлопнуты)."""
+    out: list[tuple[str, dict[str, Any]]] = []
+    last: dict[str, Any] | None = None
+    for v in _list_versions():  # newest -> oldest
+        e = _entry_at(v, key)
+        if e is None:
+            continue
+        ed = _entry_to_dict(e)
+        if ed == last:
+            continue  # то же состояние — не дублируем
+        out.append((v, ed))
+        last = ed
+    return out
+
+
 def _save(data: CommentedMap) -> None:
     path = _catalog_path()
     _snapshot_current()  # сохраняем предыдущее состояние в историю
@@ -504,7 +534,8 @@ async def _edit_get(request: Request) -> HTMLResponse:
     entry = _find(_load(), key)
     if entry is None:
         return _render("Not found", f"<p>No dashboard with slug/luid '{html.escape(key)}'.</p><a href='/'>Back</a>")
-    return _render(f"Edit — {entry.get('name') or key}", _form_body(entry, key, is_new=False))
+    body = _form_body(entry, key, is_new=False) + _entry_history_body(key, _entry_to_dict(entry))
+    return _render(f"Edit — {entry.get('name') or key}", body)
 
 
 def _apply_form(entry: CommentedMap, form: dict[str, str]) -> None:
@@ -612,6 +643,77 @@ def _history_body() -> str:
     </table></div>
     <p class="count">{len(versions)} версий в истории (хранятся последние {HISTORY_KEEP}).</p>
     """
+
+
+_SCALAR_FIELDS = ("name", "owner", "purpose", "audience", "freshness_sla")
+_BLOCK_LIST_FIELDS = ("description", "how_built", "notes", "kpis", "glossary")
+
+
+def _entry_history_body(key: str, current: dict[str, Any]) -> str:
+    """Таймлайн изменений конкретной записи — что отличалось от текущего состояния."""
+    history = _entry_history(key)
+    if len(history) <= 1:
+        return ""  # нечего показывать (только текущее состояние)
+
+    nodes = []
+    for version, ed in history:
+        changed = []
+        for f in _SCALAR_FIELDS:
+            if ed.get(f) != current.get(f):
+                was = html.escape(str(ed.get(f) or "—"))
+                changed.append(f"<span class='pill'>{f}</span> было: <b>{was}</b>")
+        for f in _BLOCK_LIST_FIELDS:
+            if ed.get(f) != current.get(f):
+                changed.append(f"<span class='pill'>{f}</span> изменено")
+        diff = " &nbsp; ".join(changed) if changed else "<span class='muted'>совпадает с текущей версией</span>"
+        vh = html.escape(version)
+        nodes.append(f"""
+        <div class="tl-item">
+          <div class="tl-dot"></div>
+          <div class="tl-node">
+            <div class="tl-head">
+              <span class="tl-time">{html.escape(_fmt_version(version))}</span>
+              <form method="post" action="/edit/{html.escape(key)}/restore/{vh}" style="margin:0">
+                <button onclick="return confirm('Восстановить эту запись к данной версии? Текущее уйдёт в историю.')">Restore</button>
+              </form>
+            </div>
+            <div class="tl-diff">{diff}</div>
+          </div>
+        </div>""")
+
+    return f"""
+    <style>
+      .timeline {{ position: relative; margin-left: .4rem; padding-left: 1.2rem; }}
+      .timeline::before {{ content:""; position:absolute; left:4px; top:4px; bottom:4px; width:2px; background:var(--border); }}
+      .tl-item {{ position: relative; margin-bottom: 1rem; }}
+      .tl-item:last-child {{ margin-bottom: 0; }}
+      .tl-dot {{ position:absolute; left:-1.2rem; top:5px; width:10px; height:10px; border-radius:50%;
+                 background:var(--accent-content); box-shadow:0 0 0 3px color-mix(in srgb,var(--accent-content) 22%,transparent); }}
+      .tl-head {{ display:flex; align-items:center; justify-content:space-between; gap:.6rem; }}
+      .tl-time {{ font-family:ui-monospace,monospace; font-size:.82rem; color:var(--text-muted); }}
+      .tl-diff {{ margin-top:.35rem; font-size:.85rem; line-height:1.9; }}
+    </style>
+    <div class="section section--content">
+      <h2>История изменений</h2>
+      <div class="timeline">{''.join(nodes)}</div>
+      <div class="hint" style="margin-top:.8rem">Показаны точки изменения этой записи (последние {HISTORY_KEEP} снимков каталога). Значения — какими они были на тот момент.</div>
+    </div>
+    """
+
+
+async def _entry_restore(request: Request) -> RedirectResponse:
+    key = request.path_params["key"]
+    hist_entry = _entry_at(request.path_params["version"], key)
+    if hist_entry is None:
+        return RedirectResponse(f"/edit/{key}", status_code=303)
+    data = _load()
+    idx = _find_index(data, key)
+    if idx >= 0:
+        data["dashboards"][idx] = hist_entry  # заменяем ТОЛЬКО эту запись
+    else:
+        data["dashboards"].append(hist_entry)  # была удалена — возвращаем
+    _save(data)  # _save сам снимет снимок текущего состояния (обратимо)
+    return RedirectResponse(f"/edit/{key}", status_code=303)
 
 
 async def _history_get(_request: Request) -> HTMLResponse:
@@ -870,6 +972,7 @@ def build_app() -> Any:
             Route("/history", _history_get, methods=["GET"]),
             Route("/history/{version}", _history_download, methods=["GET"]),
             Route("/history/{version}/restore", _history_restore, methods=["POST"]),
+            Route("/edit/{key}/restore/{version}", _entry_restore, methods=["POST"]),
             Route("/healthz", _healthz, methods=["GET"]),
             Route("/api/dashboards", _api_list, methods=["GET"]),
             Route("/api/dashboards", _api_create, methods=["POST"]),
