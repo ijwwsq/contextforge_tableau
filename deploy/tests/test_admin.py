@@ -459,7 +459,7 @@ def test_entry_history_timeline_and_pointwise_restore(catalog_file: Path, client
     # история записи содержит прошлые состояния (точки изменения)
     hist = admin._entry_history("sales")
     assert len(hist) >= 2
-    oldest_version, oldest_state = hist[-1]
+    oldest_version, _when, oldest_state = hist[-1]
     assert oldest_state["owner"] == "analytics@example.com"  # исходный owner из фикстуры
 
     # точечный restore возвращает ТОЛЬКО эту запись к старой версии

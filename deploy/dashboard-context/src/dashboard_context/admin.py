@@ -21,7 +21,13 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Route
 
+from . import pgstore
+
 log = logging.getLogger("dashboard_context.admin")
+
+
+def _fmt_dt(t: datetime) -> str:
+    return t.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 FIELDS_TEXT = ("luid", "slug", "name", "owner", "purpose", "audience", "freshness_sla")
 FIELDS_BLOCK = ("description", "how_built", "notes")
@@ -40,6 +46,16 @@ def _catalog_path() -> Path:
 
 
 def _load() -> CommentedMap:
+    if pgstore.enabled():
+        data = CommentedMap()
+        seq = CommentedSeq()
+        for e in pgstore.load_all():
+            m = CommentedMap()
+            for k, v in e.items():
+                m[k] = v
+            seq.append(m)
+        data["dashboards"] = seq
+        return data
     path = _catalog_path()
     with path.open("r", encoding="utf-8", newline="") as f:
         data = _yaml.load(f)
@@ -100,8 +116,10 @@ def _version_path(version: str) -> Path | None:
     return p if p.exists() else None
 
 
-def _entry_at(version: str, key: str) -> CommentedMap | None:
-    """Достать запись `key` из снимка каталога версии `version`."""
+def _entry_at(version: str, key: str) -> Any:
+    """Достать запись `key` в версии `version` (из БД или из файлового снимка)."""
+    if pgstore.enabled():
+        return pgstore.entry_at(version, key)
     p = _version_path(version)
     if p is None:
         return None
@@ -113,10 +131,12 @@ def _entry_at(version: str, key: str) -> CommentedMap | None:
     return _find(data, key) if data else None
 
 
-def _entry_history(key: str) -> list[tuple[str, dict[str, Any]]]:
-    """История одной записи: список (версия, состояние) от новых к старым,
-    только точки изменения (подряд одинаковые состояния схлопнуты)."""
-    out: list[tuple[str, dict[str, Any]]] = []
+def _entry_history(key: str) -> list[tuple[str, str, dict[str, Any]]]:
+    """История одной записи: (version_id, когда, состояние) от новых к старым.
+    В файловом режиме подряд одинаковые состояния схлопнуты."""
+    if pgstore.enabled():
+        return [(vid, _fmt_dt(t), d) for vid, t, d in pgstore.entry_history(key)]
+    out: list[tuple[str, str, dict[str, Any]]] = []
     last: dict[str, Any] | None = None
     for v in _list_versions():  # newest -> oldest
         e = _entry_at(v, key)
@@ -125,12 +145,16 @@ def _entry_history(key: str) -> list[tuple[str, dict[str, Any]]]:
         ed = _entry_to_dict(e)
         if ed == last:
             continue  # то же состояние — не дублируем
-        out.append((v, ed))
+        out.append((v, _fmt_version(v), ed))
         last = ed
     return out
 
 
 def _save(data: CommentedMap) -> None:
+    if pgstore.enabled():
+        # save_all сам снимает per-entry историю изменившихся записей.
+        pgstore.save_all([_entry_to_dict(e) for e in data.get("dashboards", [])])
+        return
     path = _catalog_path()
     _snapshot_current()  # сохраняем предыдущее состояние в историю
     tmp = path.with_suffix(".yml.tmp")
@@ -618,6 +642,24 @@ def _fmt_version(v: str) -> str:
 
 
 def _history_body() -> str:
+    if pgstore.enabled():
+        changes = pgstore.recent_changes()
+        if not changes:
+            return ('<div class="breadcrumb"><a class="btn ghost" href="/">← All dashboards</a></div>'
+                    '<div class="card"><div class="empty">История пуста — наполняется при изменениях.</div></div>')
+        rows = "".join(
+            f"<tr><td>{html.escape(_fmt_dt(t))}</td>"
+            f"<td><a class='name' href='/edit/{html.escape(key)}'>{html.escape(key)}</a></td></tr>"
+            for _vid, key, t in changes
+        )
+        return f"""
+        <div class="breadcrumb"><a class="btn ghost" href="/">← All dashboards</a></div>
+        <div class="card"><table class="list">
+          <thead><tr><th>Когда (UTC)</th><th>Дашборд (открыть — увидеть таймлайн)</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table></div>
+        <p class="count">Последние изменения по каталогу (per-entry история — на странице записи).</p>
+        """
     versions = _list_versions()
     if not versions:
         return (
@@ -652,11 +694,11 @@ _BLOCK_LIST_FIELDS = ("description", "how_built", "notes", "kpis", "glossary")
 def _entry_history_body(key: str, current: dict[str, Any]) -> str:
     """Таймлайн изменений конкретной записи — что отличалось от текущего состояния."""
     history = _entry_history(key)
-    if len(history) <= 1:
-        return ""  # нечего показывать (только текущее состояние)
+    if not history:
+        return ""  # изменений ещё не было — таймлайна нет
 
     nodes = []
-    for version, ed in history:
+    for version, when, ed in history:
         changed = []
         for f in _SCALAR_FIELDS:
             if ed.get(f) != current.get(f):
@@ -672,7 +714,7 @@ def _entry_history_body(key: str, current: dict[str, Any]) -> str:
           <div class="tl-dot"></div>
           <div class="tl-node">
             <div class="tl-head">
-              <span class="tl-time">{html.escape(_fmt_version(version))}</span>
+              <span class="tl-time">{html.escape(when)}</span>
               <form method="post" action="/edit/{html.escape(key)}/restore/{vh}" style="margin:0">
                 <button onclick="return confirm('Восстановить эту запись к данной версии? Текущее уйдёт в историю.')">Restore</button>
               </form>
@@ -960,7 +1002,29 @@ class _BasicAuth:
         await self.app(scope, receive, send)
 
 
+def _migrate_yaml_to_pg_if_empty() -> None:
+    """Разовая миграция: если БД пустая, а YAML-файл есть — переливаем в Postgres."""
+    try:
+        if not pgstore.is_empty():
+            return
+        path = _catalog_path()
+        if not path.exists():
+            return
+        with path.open("r", encoding="utf-8", newline="") as f:
+            data = _yaml.load(f)
+        entries = [_entry_to_dict(e) for e in (data.get("dashboards", []) if data else [])]
+        if entries:
+            pgstore.save_all(entries)
+            log.info("Перелито из YAML в Postgres: %d дашбордов.", len(entries))
+    except Exception as exc:  # миграция best-effort — не роняем старт
+        log.warning("Миграция YAML->PG пропущена: %s", exc)
+
+
 def build_app() -> Any:
+    if pgstore.enabled():
+        pgstore.init()
+        _migrate_yaml_to_pg_if_empty()
+        log.info("dashboard-context: хранилище — Postgres.")
     app = Starlette(
         routes=[
             Route("/", _index, methods=["GET"]),

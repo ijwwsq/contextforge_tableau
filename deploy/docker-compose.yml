@@ -183,9 +183,16 @@ services:
       - HTTP_PORT=8010
       - ADMIN_USER=${ADMIN_USER:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      # Хранилище каталога: если задано — Postgres (ТС «каталог в БД» + история на
+      # уровне записи), схема и БД создаются сами, YAML переливается разово.
+      # Пусто → остаётся YAML-файл (обратная совместимость).
+      - DASHBOARD_DATABASE_URL=${DASHBOARD_DATABASE_URL:-}
     # Хост-порт снят: доступ только через admin-console (единый вход с ролями).
     volumes:
       - ./dashboard-context/catalog:/app/catalog:rw
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8010/healthz',timeout=3).status==200 else sys.exit(1)\""]
       interval: 30s

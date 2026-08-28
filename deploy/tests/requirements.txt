@@ -24,3 +24,6 @@ pyjwt>=2.8
 
 # Рантайм tableau-identity (шифрование PAT-секретов).
 cryptography>=42.0
+
+# Рантайм dashboard-context в режиме Postgres (перенос каталога в БД).
+psycopg[binary]>=3.1
