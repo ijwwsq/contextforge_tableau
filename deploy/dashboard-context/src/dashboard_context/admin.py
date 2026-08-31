@@ -755,7 +755,7 @@ def _entry_history_body(key: str, current: dict[str, Any]) -> str:
       .vdetail{{margin-top:5px;font-size:.82rem;color:#787774;line-height:1.9}}
       .vk{{font-family:ui-monospace,monospace;font-size:.76rem;background:#ececeb;border-radius:4px;padding:1px 6px;color:#37352f;margin-right:2px}}
     </style>
-    <div class="section section--content">
+    <div class="section section--content" style="margin-top:2rem">
       <h2>История версий</h2>
       <div class="vgraph">{''.join(nodes)}</div>
       <div class="hint" style="margin-top:10px">Ветка версий карточки: сверху HEAD — текущая, ниже прошлые состояния. «Restore» откатывает только эту карточку.</div>
