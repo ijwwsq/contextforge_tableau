@@ -119,12 +119,18 @@ class Broker:
         if token:
             headers["X-Tableau-Auth"] = token
 
+        resp: httpx.Response | None = None
         for attempt in (1, 2):
             upstream_req = self._client.build_request(
                 request.method, self._upstream, headers=headers, content=body,
                 params=request.query_params,
             )
-            resp = await self._client.send(upstream_req, stream=True)
+            try:
+                resp = await self._client.send(upstream_req, stream=True)
+            except httpx.RequestError as exc:
+                # tableau-mcp недоступен/таймаут — не роняем брокер, отдаём чистую ошибку.
+                log.warning("upstream tableau-mcp недоступен: %s", exc)
+                return _jsonrpc_error(None, -32003, "Сервер инструментов Tableau временно недоступен.")
             # Протухшую сессию видно как 401 от passthrough-мидлвари tableau-mcp:
             # инвалидируем и логинимся заново ровно один раз.
             if resp.status_code == 401 and token and user and attempt == 1:
@@ -186,7 +192,16 @@ async def _lifespan(app: Starlette) -> AsyncIterator[None]:
     store = default_store()
     sessions = SessionCache(TableauEndpoint.from_env())
     upstream = os.environ["TABLEAU_MCP_URL"]
-    client = httpx.AsyncClient(timeout=float(os.environ.get("UPSTREAM_TIMEOUT_SECONDS", 60)))
+    # Пул соединений к tableau-mcp: под нагрузкой переиспользуем keep-alive
+    # соединения вместо новых на каждый вызов. Размеры настраиваются под RPS.
+    limits = httpx.Limits(
+        max_connections=int(os.environ.get("UPSTREAM_MAX_CONNECTIONS", 200)),
+        max_keepalive_connections=int(os.environ.get("UPSTREAM_MAX_KEEPALIVE", 50)),
+        keepalive_expiry=float(os.environ.get("UPSTREAM_KEEPALIVE_EXPIRY", 30)),
+    )
+    client = httpx.AsyncClient(
+        timeout=float(os.environ.get("UPSTREAM_TIMEOUT_SECONDS", 60)), limits=limits,
+    )
     app.state.broker = Broker(store, sessions, upstream, client)
     try:
         yield

@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -86,7 +87,13 @@ class MappingStore:
         if self._db:
             if time.monotonic() - self._loaded_at < self._ttl:
                 return
-            raw = _pg.read_all(self._db)
+            try:
+                raw = _pg.read_all(self._db)
+            except Exception as exc:  # БД икнула — не роняем tool-вызов, живём на кэше
+                logging.getLogger("tableau_identity.store").warning(
+                    "Postgres недоступен, отдаю последнюю копию маппинга: %s", exc)
+                self._loaded_at = time.monotonic()  # не долбить БД чаще TTL
+                return
             with self._lock:
                 self._by_user = self._decrypt_raw(raw)
                 self._loaded_at = time.monotonic()

@@ -322,6 +322,50 @@ def test_broker_refreshes_session_on_upstream_401(store: MappingStore, monkeypat
     assert state["upstream"] == 2 and state["signin"] == 2  # инвалидация + релогин + retry
 
 
+# ─────────────────────── отказоустойчивость ───────────────────────
+def test_broker_upstream_unavailable_returns_clean_error(store: MappingStore, monkeypatch) -> None:
+    """tableau-mcp недоступен → чистая JSON-RPC ошибка, а не 500/креш брокера."""
+    store.put("alice@corp", "alice@corp", "alice-pat", "secret")
+    monkeypatch.setenv("IDENTITY_VERIFY", "false")
+
+    def raiser(req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("upstream down")
+
+    def signin(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"credentials": {"token": "S", "site": {"id": "s"}, "user": {"id": "u"}}})
+
+    up_client = httpx.AsyncClient(transport=httpx.MockTransport(raiser))
+    b = bm.Broker(store, _signin_cache(signin), "http://up.local/tableau-mcp", up_client)
+    app = Starlette(routes=[Route("/tableau-mcp", bm._handle, methods=["POST"])])
+    app.state.broker = b
+    r = TestClient(app).post("/tableau-mcp", headers=_bearer_unverified("alice@corp"),
+                             json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "list-views"}})
+    assert r.json()["error"]["code"] == -32003
+
+
+def test_store_serves_stale_mapping_on_db_error(tmp_path, monkeypatch) -> None:
+    """Если Postgres икнул, брокер получает ПОСЛЕДНЮЮ удачную копию, а не исключение."""
+    from tableau_identity import store as st
+    key = generate_key()
+    enc = st.Fernet(key.encode()).encrypt(b"secret").decode()
+    row = {"alice@corp": {"user": "alice@corp", "tableau_username": "a@t", "pat_name": "p", "pat_secret_enc": enc}}
+    state = {"n": 0}
+
+    def read_all(_url):
+        state["n"] += 1
+        if state["n"] == 1:
+            return row
+        raise RuntimeError("db down")  # второй раз — БД недоступна
+
+    monkeypatch.setattr(st._pg, "init", lambda url: None)
+    monkeypatch.setattr(st._pg, "read_all", read_all)
+    monkeypatch.setenv("IDENTITY_DB_TTL_SECONDS", "0")  # перечитывать на каждый get
+    s = st.MappingStore(tmp_path / "unused.yml", key, db_url="postgresql://dummy")
+
+    assert s.get("alice@corp").pat_secret == "secret"      # первая загрузка ок
+    assert s.get("alice@corp").pat_secret == "secret"      # БД упала → отдаём кэш, не падаем
+
+
 # ─────────────────────── аудит: учётка ↔ инструмент ───────────────────────
 def _audits(caplog) -> list[dict]:
     return [json.loads(r.message) for r in caplog.records if r.name == "tableau_identity.audit"]
