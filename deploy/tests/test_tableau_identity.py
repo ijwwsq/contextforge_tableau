@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 from pathlib import Path
 
 import httpx
@@ -319,6 +320,44 @@ def test_broker_refreshes_session_on_upstream_401(store: MappingStore, monkeypat
     assert r.status_code == 200
     assert r.json()["result"] == {"ok": True}
     assert state["upstream"] == 2 and state["signin"] == 2  # инвалидация + релогин + retry
+
+
+# ─────────────────────── аудит: учётка ↔ инструмент ───────────────────────
+def _audits(caplog) -> list[dict]:
+    return [json.loads(r.message) for r in caplog.records if r.name == "tableau_identity.audit"]
+
+
+def test_broker_audits_toolcall_user_and_tool(store: MappingStore, monkeypatch, caplog) -> None:
+    store.put("alice@corp", "alice@corp", "alice-pat", "secret")
+
+    def upstream(request: Request) -> JSONResponse:
+        return JSONResponse({"jsonrpc": "2.0", "id": 1, "result": {"ok": True}})
+
+    def signin(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"credentials": {"token": "S", "site": {"id": "s"}, "user": {"id": "u"}}})
+
+    client = _make_broker_app(store, _upstream_app(upstream), signin, monkeypatch)
+    with caplog.at_level(logging.INFO, logger="tableau_identity.audit"):
+        client.post("/tableau-mcp", headers=_bearer_unverified("alice@corp"),
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "list-views"}})
+    a = _audits(caplog)
+    assert any(x["event"] == "call" and x["user"] == "alice@corp" and x["tool"] == "list-views"
+               and x["tableau_user"] == "alice@corp" and "ts" in x for x in a)
+
+
+def test_broker_audits_blocked_unmapped(store: MappingStore, monkeypatch, caplog) -> None:
+    def upstream(request: Request) -> JSONResponse:
+        return JSONResponse({})
+
+    def signin(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"credentials": {"token": "t", "site": {"id": "s"}, "user": {"id": "u"}}})
+
+    client = _make_broker_app(store, _upstream_app(upstream), signin, monkeypatch)
+    with caplog.at_level(logging.INFO, logger="tableau_identity.audit"):
+        client.post("/tableau-mcp", headers=_bearer_unverified("nobody@corp"),
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "query-datasource"}})
+    a = _audits(caplog)
+    assert any(x["event"] == "blocked" and x["reason"] == "no_mapping" and x["tool"] == "query-datasource" for x in a)
 
 
 # ─────────────────────────── admin ───────────────────────────

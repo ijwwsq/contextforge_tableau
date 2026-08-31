@@ -18,6 +18,7 @@ import json
 import logging
 import os
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -32,6 +33,18 @@ from .store import MappingStore, default_store
 from .tableau_auth import SessionCache, TableauEndpoint, TableauSignInError
 
 log = logging.getLogger("tableau_identity.broker")
+
+# Отдельный логгер аудита: по одной JSON-строке на tool-вызов (учётка ↔ инструмент).
+# Ядро гейта не трогаем — брокер видит и личность, и имя инструмента сразу.
+# Формат намеренно простой (structured log в stdout); переезд в БД — когда
+# определитесь с форматом хранения.
+audit_log = logging.getLogger("tableau_identity.audit")
+
+
+def _emit_audit(**fields: Any) -> None:
+    record = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    record.update({k: v for k, v in fields.items() if v is not None})
+    audit_log.info(json.dumps(record, ensure_ascii=False))
 
 # Заголовки, которые нельзя переносить между hop'ами как есть.
 _HOP_BY_HOP = {
@@ -72,13 +85,16 @@ class Broker:
             rpc = _parse_rpc(body)
             if rpc is not None and rpc.get("method") == "tools/call":
                 # Только реальный вызов инструмента требует личность + привязку.
+                tool = str((rpc.get("params") or {}).get("name") or "")
                 if not user:
+                    _emit_audit(event="blocked", reason="no_identity", tool=tool)
                     return _jsonrpc_error(
                         rpc.get("id"), -32001,
                         "Требуется аутентификация: не найден токен пользователя.",
                     )
                 mapping = self._store.get(user)
                 if mapping is None:
+                    _emit_audit(event="blocked", reason="no_mapping", user=user, tool=tool)
                     return _jsonrpc_error(
                         rpc.get("id"), -32001,
                         f"Для пользователя '{user}' не привязана учётная запись Tableau. "
@@ -87,7 +103,14 @@ class Broker:
                 try:
                     token = await self._sessions.get_token(user, mapping.pat_name, mapping.pat_secret)
                 except TableauSignInError as exc:
+                    _emit_audit(event="error", reason="signin", user=user, tool=tool,
+                                tableau_user=mapping.tableau_username)
                     return _jsonrpc_error(rpc.get("id"), -32002, str(exc))
+                resp = await self._proxy(request, body, user, token)
+                # Главная запись аудита: учётка X вызвала инструмент Y (под учёткой Tableau Z).
+                _emit_audit(event="call", user=user, tool=tool,
+                            tableau_user=mapping.tableau_username, status=resp.status_code)
+                return resp
 
         return await self._proxy(request, body, user, token)
 
