@@ -224,6 +224,8 @@ services:
       - TABLEAU_SESSION_TTL_SECONDS=${TABLEAU_SESSION_TTL_SECONDS:-13800}
       - MAPPINGS_PATH=/app/catalog/mappings.yml
       - TABLEAU_IDENTITY_ENC_KEY=${TABLEAU_IDENTITY_ENC_KEY}
+      # Хранилище привязок: задан — Postgres (секрет так же зашифрован), пусто → YAML.
+      - IDENTITY_DATABASE_URL=${IDENTITY_DATABASE_URL:-}
       # Валидация проброшенного gateway-JWT (личность юзера). По умолчанию — тем же
       # секретом, что и гейт; claim личности — sub.
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
@@ -236,6 +238,8 @@ services:
     depends_on:
       tableau-mcp:
         condition: service_started
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8020/healthz',timeout=3).status==200 else sys.exit(1)\""]
       interval: 30s
@@ -254,11 +258,15 @@ services:
       - HTTP_PORT=8021
       - MAPPINGS_PATH=/app/catalog/mappings.yml
       - TABLEAU_IDENTITY_ENC_KEY=${TABLEAU_IDENTITY_ENC_KEY}
+      - IDENTITY_DATABASE_URL=${IDENTITY_DATABASE_URL:-}
       - IDENTITY_ADMIN_USER=${IDENTITY_ADMIN_USER:-admin}
       - IDENTITY_ADMIN_PASSWORD=${IDENTITY_ADMIN_PASSWORD}
     # Хост-порт снят: доступ только через admin-console (единый вход с ролями).
     volumes:
       - ./tableau-identity/catalog:/app/catalog:rw
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8021/healthz',timeout=3).status==200 else sys.exit(1)\""]
       interval: 30s

@@ -10,7 +10,8 @@ COPY pyproject.toml ./
 COPY src ./src
 
 RUN pip install --upgrade pip \
- && pip install .
+ && pip install . \
+ && pip install "psycopg[binary]>=3.1"
 
 RUN adduser --disabled-password --gecos "" mcp \
  && mkdir -p /app/catalog \

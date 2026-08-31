@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import html
+import logging
 import os
 from typing import Any
 
@@ -124,7 +125,15 @@ def build_app() -> Any:
         Route("/api/mappings", _api_list, methods=["GET"]),
         Route("/healthz", _health, methods=["GET"]),
     ])
-    app.state.store = default_store()
+    store = default_store()
+    try:  # разовая миграция YAML→Postgres (если включён PG и БД пустая)
+        moved = store.migrate_from_file_if_empty()
+        if moved:
+            logging.getLogger("tableau_identity.admin").info(
+                "Перенесено привязок из YAML в Postgres: %d.", moved)
+    except Exception as exc:  # миграция best-effort — не роняем старт
+        logging.getLogger("tableau_identity.admin").warning("Миграция маппингов YAML->PG пропущена: %s", exc)
+    app.state.store = store
     return _BasicAuth(app, os.environ.get("IDENTITY_ADMIN_USER", "admin"), password)
 
 
