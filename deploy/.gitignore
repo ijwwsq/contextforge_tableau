@@ -12,3 +12,6 @@ local-images.tar.gz
 # История версий бизнес-контекста (наполняется в рантайме админкой).
 dashboard-context/catalog/history/
 CREDENTIALS.local.md
+
+# История версий гайда презентаций (рантайм).
+presentation-context/catalog/history/
