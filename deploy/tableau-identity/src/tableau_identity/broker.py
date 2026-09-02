@@ -59,6 +59,10 @@ def _jsonrpc_error(req_id: Any, code: int, message: str) -> JSONResponse:
     return JSONResponse({"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}})
 
 
+class UpstreamError(Exception):
+    """tableau-mcp недоступен/таймаут — чтобы аудит не записал ложный успешный call."""
+
+
 def _parse_rpc(body: bytes) -> dict[str, Any] | None:
     """Разобрать одиночный JSON-RPC вызов; батчи/мусор → None (просто проксируем)."""
     try:
@@ -106,13 +110,22 @@ class Broker:
                     _emit_audit(event="error", reason="signin", user=user, tool=tool,
                                 tableau_user=mapping.tableau_username)
                     return _jsonrpc_error(rpc.get("id"), -32002, str(exc))
-                resp = await self._proxy(request, body, user, token)
+                try:
+                    resp = await self._proxy(request, body, user, token)
+                except UpstreamError as exc:
+                    _emit_audit(event="error", reason="upstream", user=user, tool=tool,
+                                tableau_user=mapping.tableau_username)
+                    return _jsonrpc_error(rpc.get("id"), -32003,
+                                          "Сервер инструментов Tableau временно недоступен.")
                 # Главная запись аудита: учётка X вызвала инструмент Y (под учёткой Tableau Z).
                 _emit_audit(event="call", user=user, tool=tool,
                             tableau_user=mapping.tableau_username, status=resp.status_code)
                 return resp
 
-        return await self._proxy(request, body, user, token)
+        try:
+            return await self._proxy(request, body, user, token)
+        except UpstreamError:
+            return _jsonrpc_error(None, -32003, "Сервер инструментов Tableau временно недоступен.")
 
     async def _proxy(self, request: Request, body: bytes, user: str | None, token: str | None) -> Response:
         headers = {k: v for k, v in request.headers.items() if k.lower() not in _STRIP_REQUEST}
@@ -128,9 +141,10 @@ class Broker:
             try:
                 resp = await self._client.send(upstream_req, stream=True)
             except httpx.RequestError as exc:
-                # tableau-mcp недоступен/таймаут — не роняем брокер, отдаём чистую ошибку.
+                # tableau-mcp недоступен/таймаут — не роняем брокер; наверх сигналим
+                # исключением, чтобы аудит записал реальный исход, а не ложный call.
                 log.warning("upstream tableau-mcp недоступен: %s", exc)
-                return _jsonrpc_error(None, -32003, "Сервер инструментов Tableau временно недоступен.")
+                raise UpstreamError(str(exc)) from exc
             # Протухшую сессию видно как 401 от passthrough-мидлвари tableau-mcp:
             # инвалидируем и логинимся заново ровно один раз.
             if resp.status_code == 401 and token and user and attempt == 1:

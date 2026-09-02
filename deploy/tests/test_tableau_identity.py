@@ -323,8 +323,9 @@ def test_broker_refreshes_session_on_upstream_401(store: MappingStore, monkeypat
 
 
 # ─────────────────────── отказоустойчивость ───────────────────────
-def test_broker_upstream_unavailable_returns_clean_error(store: MappingStore, monkeypatch) -> None:
-    """tableau-mcp недоступен → чистая JSON-RPC ошибка, а не 500/креш брокера."""
+def test_broker_upstream_unavailable_returns_clean_error(store: MappingStore, monkeypatch, caplog) -> None:
+    """tableau-mcp недоступен → чистая JSON-RPC ошибка (не 500/креш), и аудит
+    пишет РЕАЛЬНЫЙ исход (error/upstream), а не ложный успешный call."""
     store.put("alice@corp", "alice@corp", "alice-pat", "secret")
     monkeypatch.setenv("IDENTITY_VERIFY", "false")
 
@@ -338,9 +339,13 @@ def test_broker_upstream_unavailable_returns_clean_error(store: MappingStore, mo
     b = bm.Broker(store, _signin_cache(signin), "http://up.local/tableau-mcp", up_client)
     app = Starlette(routes=[Route("/tableau-mcp", bm._handle, methods=["POST"])])
     app.state.broker = b
-    r = TestClient(app).post("/tableau-mcp", headers=_bearer_unverified("alice@corp"),
-                             json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "list-views"}})
+    with caplog.at_level(logging.INFO, logger="tableau_identity.audit"):
+        r = TestClient(app).post("/tableau-mcp", headers=_bearer_unverified("alice@corp"),
+                                 json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "list-views"}})
     assert r.json()["error"]["code"] == -32003
+    a = [json.loads(x.message) for x in caplog.records if x.name == "tableau_identity.audit"]
+    assert any(e["event"] == "error" and e["reason"] == "upstream" and e["tool"] == "list-views" for e in a)
+    assert not any(e["event"] == "call" for e in a)  # ложного успешного call быть не должно
 
 
 def test_store_serves_stale_mapping_on_db_error(tmp_path, monkeypatch) -> None:
