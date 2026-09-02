@@ -72,6 +72,20 @@ def _parse_rpc(body: bytes) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _is_tool_error(body: bytes) -> bool | None:
+    """MCP: ошибка инструмента = JSON-RPC error ИЛИ result.isError=true. None — не JSON."""
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if "error" in data:
+        return True
+    result = data.get("result")
+    return bool(isinstance(result, dict) and result.get("isError") is True)
+
+
 class Broker:
     def __init__(self, store: MappingStore, sessions: SessionCache, upstream: str, client: httpx.AsyncClient):
         self._store = store
@@ -111,23 +125,29 @@ class Broker:
                                 tableau_user=mapping.tableau_username)
                     return _jsonrpc_error(rpc.get("id"), -32002, str(exc))
                 try:
-                    resp = await self._proxy(request, body, user, token)
-                except UpstreamError as exc:
+                    resp, tool_error = await self._proxy(request, body, user, token)
+                except UpstreamError:
                     _emit_audit(event="error", reason="upstream", user=user, tool=tool,
                                 tableau_user=mapping.tableau_username)
                     return _jsonrpc_error(rpc.get("id"), -32003,
                                           "Сервер инструментов Tableau временно недоступен.")
                 # Главная запись аудита: учётка X вызвала инструмент Y (под учёткой Tableau Z).
+                # tool_error=True — инструмент вернул ошибку (не транспорт, а бизнес-результат).
                 _emit_audit(event="call", user=user, tool=tool,
-                            tableau_user=mapping.tableau_username, status=resp.status_code)
+                            tableau_user=mapping.tableau_username, status=resp.status_code,
+                            tool_error=tool_error)
                 return resp
 
         try:
-            return await self._proxy(request, body, user, token)
+            resp, _ = await self._proxy(request, body, user, token)
+            return resp
         except UpstreamError:
             return _jsonrpc_error(None, -32003, "Сервер инструментов Tableau временно недоступен.")
 
-    async def _proxy(self, request: Request, body: bytes, user: str | None, token: str | None) -> Response:
+    async def _proxy(self, request: Request, body: bytes, user: str | None,
+                     token: str | None) -> tuple[Response, bool | None]:
+        """Возвращает (ответ, tool_error). tool_error: True — инструмент вернул
+        ошибку (isError/JSON-RPC error), False — успех, None — не определить (SSE)."""
         headers = {k: v for k, v in request.headers.items() if k.lower() not in _STRIP_REQUEST}
         if token:
             headers["X-Tableau-Auth"] = token
@@ -156,11 +176,26 @@ class Broker:
                 try:
                     token = await self._sessions.get_token(user, mapping.pat_name, mapping.pat_secret)
                 except TableauSignInError as exc:
-                    return _jsonrpc_error(None, -32002, str(exc))
+                    return _jsonrpc_error(None, -32002, str(exc)), None
                 headers["X-Tableau-Auth"] = token
                 continue
-            return self._stream_back(resp)
-        return self._stream_back(resp)
+            return await self._finalize(resp)
+        return await self._finalize(resp)
+
+    async def _finalize(self, resp: httpx.Response) -> tuple[Response, bool | None]:
+        out_headers = {
+            k: v for k, v in resp.headers.items()
+            if k.lower() not in _HOP_BY_HOP | {"content-encoding", "content-type"}
+        }
+        ctype = resp.headers.get("content-type", "")
+        # JSON-ответ инструмента маленький — буферизуем и смотрим, ошибка ли это.
+        # SSE (text/event-stream) стримим как есть, tool_error не определяем.
+        if "application/json" in ctype.lower():
+            raw = await resp.aread()
+            await resp.aclose()
+            return (Response(raw, status_code=resp.status_code, headers=out_headers,
+                             media_type=ctype), _is_tool_error(raw))
+        return self._stream_back(resp), None
 
     def _stream_back(self, resp: httpx.Response) -> StreamingResponse:
         # content-type несёт media_type; content-length/encoding пересчитает стрим.

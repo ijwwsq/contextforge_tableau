@@ -235,6 +235,10 @@ services:
       - IDENTITY_CLAIM=${IDENTITY_CLAIM:-sub}
       - IDENTITY_JWT_AUDIENCE=${IDENTITY_JWT_AUDIENCE:-}
       - IDENTITY_JWT_ISSUER=${IDENTITY_JWT_ISSUER:-}
+      # Асимметричная подпись/внешний IdP (пусто = HS256 встроенного провайдера):
+      #   IDENTITY_JWT_ALGORITHM=RS256 + IDENTITY_JWKS_URL (Keycloak/OIDC) ИЛИ статический ключ.
+      - IDENTITY_JWT_ALGORITHM=${IDENTITY_JWT_ALGORITHM:-}
+      - IDENTITY_JWKS_URL=${IDENTITY_JWKS_URL:-}
     volumes:
       - ./tableau-identity/catalog:/app/catalog:ro
     depends_on:

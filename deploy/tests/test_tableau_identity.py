@@ -86,7 +86,7 @@ def test_store_requires_all_fields(store: MappingStore) -> None:
 
 # ─────────────────────────── identity ───────────────────────────
 def _idcfg(**over: object) -> IdentityConfig:
-    base = dict(header="authorization", secret="topsecretkey", algorithm="HS256",
+    base = dict(header="authorization", secret="topsecretkey", algorithms=["HS256"],
                 claim="sub", verify=True, audience=None, issuer=None)
     base.update(over)
     return IdentityConfig(**base)  # type: ignore[arg-type]
@@ -112,6 +112,33 @@ def test_identity_no_verify_mode() -> None:
     cfg = _idcfg(verify=False, secret="")
     token = jwt.encode({"sub": "carol@corp"}, "any", algorithm="HS256")
     assert extract_user({"authorization": f"Bearer {token}"}, cfg) == "carol@corp"
+
+
+def _rsa_keypair() -> tuple[str, str]:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    priv_pem = priv.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                  serialization.NoEncryption()).decode()
+    pub_pem = priv.public_key().public_bytes(serialization.Encoding.PEM,
+                                             serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+    return priv_pem, pub_pem
+
+
+def test_identity_rs256_with_public_key() -> None:
+    """Асимметричная подпись (как у внешнего IdP): проверка публичным ключом."""
+    priv, pub = _rsa_keypair()
+    token = jwt.encode({"sub": "alice@corp"}, priv, algorithm="RS256")
+    cfg = _idcfg(algorithms=["RS256"], secret="", public_key=pub)
+    assert extract_user({"authorization": f"Bearer {token}"}, cfg) == "alice@corp"
+
+
+def test_identity_rs256_wrong_public_key_rejected() -> None:
+    priv1, _ = _rsa_keypair()
+    _, pub2 = _rsa_keypair()
+    token = jwt.encode({"sub": "alice@corp"}, priv1, algorithm="RS256")
+    cfg = _idcfg(algorithms=["RS256"], secret="", public_key=pub2)  # чужой ключ
+    assert extract_user({"authorization": f"Bearer {token}"}, cfg) is None
 
 
 # ─────────────────────────── tableau_auth ───────────────────────────
@@ -409,6 +436,25 @@ def test_broker_audits_blocked_unmapped(store: MappingStore, monkeypatch, caplog
     assert any(x["event"] == "blocked" and x["reason"] == "no_mapping" and x["tool"] == "query-datasource" for x in a)
 
 
+def test_broker_audits_tool_error_result(store: MappingStore, monkeypatch, caplog) -> None:
+    """Инструмент вернул isError=true (HTTP 200) → аудит помечает tool_error, а не «успех»."""
+    store.put("alice@corp", "alice@corp", "alice-pat", "secret")
+
+    def upstream(request: Request) -> JSONResponse:
+        return JSONResponse({"jsonrpc": "2.0", "id": 1, "result": {"isError": True,
+                             "content": [{"type": "text", "text": "boom"}]}})
+
+    def signin(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"credentials": {"token": "S", "site": {"id": "s"}, "user": {"id": "u"}}})
+
+    client = _make_broker_app(store, _upstream_app(upstream), signin, monkeypatch)
+    with caplog.at_level(logging.INFO, logger="tableau_identity.audit"):
+        client.post("/tableau-mcp", headers=_bearer_unverified("alice@corp"),
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "query-datasource"}})
+    a = _audits(caplog)
+    assert any(x["event"] == "call" and x.get("tool_error") is True and x["tool"] == "query-datasource" for x in a)
+
+
 # ─────────────────────────── admin ───────────────────────────
 @pytest.fixture
 def admin_client(tmp_path: Path, monkeypatch) -> TestClient:
@@ -488,7 +534,7 @@ def test_seam_real_gateway_forwards_identity_to_broker(monkeypatch) -> None:
     assert upstream.get("Authorization") == user_token
 
     # Реальный брокер достаёт из этого sub пользователя.
-    cfg = IdentityConfig(header="authorization", secret=secret, algorithm="HS256",
+    cfg = IdentityConfig(header="authorization", secret=secret, algorithms=["HS256"],
                          claim="sub", verify=True, audience=None, issuer=None)
     assert extract_user({k.lower(): v for k, v in upstream.items()}, cfg) == "alice@corp"
 
